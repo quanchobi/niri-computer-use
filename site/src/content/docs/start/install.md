@@ -1,6 +1,6 @@
 ---
 title: Install
-description: Install niri-computer-use with the install script or with cargo, add the agent skill, and check it against your niri session.
+description: Install niri-computer-use with the install script, cargo or Nix, add the agent skill, and check it against your niri session.
 sidebar:
   order: 1
 ---
@@ -16,9 +16,9 @@ sidebar:
 - Optional, for a [background desktop](../../concepts/configuration/#background): `include "niri-computer-use.kdl"` at the end of your niri config, with that file created first (see [First session](../first-session/#work-in-a-background-desktop)), and `dbus-daemon` for its private bus.
 - A monitor at transform `Normal`, for the pointer tools. `pointer_move`, `click`, `drag` and `scroll` act on the monitor of the screenshot they aim through, whatever other monitors there are; on a rotated monitor they refuse with [`untested_output_config`](../../reference/troubleshooting/#the-pointer-tools-fail-with-untested_output_config). The other tools, the keyboard and screenshots among them, work with any monitors.
 
-## Two ways to install
+## Ways to install
 
-Both give you the same server. The script is quicker and also installs the agent skill; cargo builds the crate on your machine and leaves the skill to you.
+All give you the same server. The script is quicker and also installs the agent skill; cargo builds the crate on your machine and leaves the skill to you; [Nix](#with-nix) builds it from the repository's flake, with the skill in the package.
 
 | | Install script | Cargo |
 |---|---|---|
@@ -58,6 +58,17 @@ cargo install --locked --path .
 ```
 
 To update a source build, run `git pull` and the same `cargo install` again, inside the clone.
+
+### With Nix
+
+The repository is a flake. Its package, `packages.<system>.default` for `x86_64-linux` and `aarch64-linux`, builds the binary with the Rust and libxkbcommon of the nixos-unstable nixpkgs it pins in `flake.lock`, and holds the skill and the [Noctalia plugin](../noctalia-plugin/) as the install script lays them out, under `share/niri-computer-use`. Inside a clone:
+
+```sh
+nix build
+./result/bin/niri-computer-use status
+```
+
+A flake that takes this one as an input installs the package and links its `share/niri-computer-use/skills/niri-computer-use` where its agents look for skills. The package brings no `grim`, `loginctl` or `notify-send`: the server finds them on the client's `PATH` and in the directories of [`NIRI_COMPUTER_USE_DESKTOP_PATH`](../../concepts/configuration/#environment), as with the other builds. Nix builds it without running its tests, which need the machine's own files and a niri.
 
 ## The skill
 

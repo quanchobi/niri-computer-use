@@ -26,7 +26,7 @@ It offers up to 22 tools over stdio: reading the desktop, screenshots it can sav
 
 Release builds exist for x86_64 and aarch64 Linux, and both need glibc 2.39 or newer and libxkbcommon. Either way you need niri 26.04, and `grim` and `loginctl` at run time, plus `notify-send` if you turn on `confirm_lease`.
 
-Two ways to install, both giving the same server:
+Three ways to install, all giving the same server; the install script and cargo compare like this:
 
 | | Install script | Cargo |
 |---|---|---|
@@ -53,7 +53,9 @@ The crate holds no skill. Install it with the [skills CLI](https://skills.sh), w
 npx skills add ayagmar/niri-computer-use --skill niri-computer-use --agent claude-code --agent pi --agent codex -g
 ```
 
-[Install](https://ayagmar.github.io/niri-computer-use/start/install/) has the full steps, among them building from a clone, installing by hand from the tarball and updating while agents run.
+**With Nix.** The repository is a flake: `nix build` in a clone builds the binary into `result/bin`, with the skill and the Noctalia plugin under `result/share/niri-computer-use`.
+
+[Install](https://ayagmar.github.io/niri-computer-use/start/install/) has the full steps, among them building from a clone, building with Nix, installing by hand from the tarball and updating while agents run.
 
 ## Quickstart
 
