@@ -242,3 +242,13 @@ These come only from a server in [shared mode](../../concepts/configuration/#sha
 With [`shared = "required"`](../../concepts/configuration/#shared), it also comes from a server that couldn't reach the engine when it started, or was refused by it: every call fails with it until one is reached, and the `detail` says why. Each call tries again, so the server is served once the cause is gone. Only a cause no call can fix, such as a socket path too long, says the server must be restarted.
 
 **What to do:** read the `detail` and `engine.log` in the runtime directory. After an `engine_version` refusal, the `detail` says what to do, from the files the engine and this client's server were started from: restart this MCP client when an install replaced its server's file, or the clients that engine serves when an install replaced the engine's. When neither was, as with two installs on different paths, it names both files: point every MCP client at one of them. A server that can't reach an engine when it starts serves its client on its own instead, unless the shared engine is required; otherwise this happens only after a loss. When the `detail` says to restart the server, fix the cause it names, then restart it from the client.
+
+## Background desktop
+
+This comes only from a server set to drive a [background desktop](../../concepts/configuration/#background).
+
+### `background_unavailable`
+
+**Cause:** the server is set to drive a background desktop (`[background]` in the policy file or `NIRI_COMPUTER_USE_BACKGROUND`) and can't: the variable's value is wrong, the policy file asks for one but is invalid, `shared = "required"` asks for the shared engine as well, or the desktop didn't start, for example because the host's niri config doesn't include `niri-computer-use.kdl` or the private bus finds no `dbus-daemon`. The `detail` says why; a failed start says the next call tries again, the others last until the setting is fixed and the server restarted. The server never drives the live desktop instead.
+
+**What to do:** an agent stops and tells you the `detail`. Run `niri-computer-use status --check` with the same setting: its background lines name the cause and the fix. After fixing the setting, restart the MCP server; after fixing what stopped a start, the agent's next call tries again. See [Troubleshooting](../troubleshooting/#every-call-fails-with-background_unavailable).

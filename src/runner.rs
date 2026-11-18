@@ -109,6 +109,16 @@ impl Desktop {
             search: dirs.join(":"),
         }
     }
+
+    /// The first file called `program` in the directories searched that this process may
+    /// execute, for another program of the desktop's, such as `dbus-daemon`.
+    pub(crate) fn locate(&self, program: &str) -> Option<PathBuf> {
+        self.search
+            .split(':')
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| Path::new(dir).join(program))
+            .find(|file| executable(file))
+    }
 }
 
 /// A command for `program`, to be looked up as `search` says. A client's program gets the
@@ -345,6 +355,105 @@ impl Drop for Launcher {
     /// exits.
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+/// A session child's environment: this process's own, with `set` added and `remove` taken
+/// out, without the session's variables `main` passed on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Exact<'a> {
+    pub(crate) set: &'a [(&'a str, OsString)],
+    pub(crate) remove: &'a [&'a str],
+}
+
+/// A child the server owns for as long as what it serves lives, such as a background
+/// desktop's nested niri or bus: in a process group of its own, with the environment
+/// `Exact` gives, stdin closed, stderr appended to a log file, and stdout piped only when
+/// asked for. Dropping the handle doesn't kill it: `stop` does, and once the server is
+/// gone, whoever cleans up after it signals the process its recorded identity names.
+#[derive(Debug)]
+pub(crate) struct Owned {
+    child: Child,
+    pub(crate) stdout: Option<ChildStdout>,
+}
+
+/// How long a child `Owned::stop` killed gets to be reaped.
+const OWNED_REAP: Duration = Duration::from_secs(1);
+
+/// Starts `program` with `args` as an `Owned` child, its stdout piped when `piped`.
+pub(crate) fn owned(
+    program: &Path,
+    args: &[String],
+    env: Exact<'_>,
+    stderr: std::fs::File,
+    piped: bool,
+) -> Result<Owned, ToolError> {
+    let mut command = own_command(program);
+    for name in env.remove {
+        command.env_remove(name);
+    }
+    let mut child = command
+        .envs(env.set.iter().map(|(name, value)| (name, value)))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(if piped { Stdio::piped() } else { Stdio::null() })
+        .stderr(stderr)
+        .process_group(0)
+        .spawn()
+        .map_err(|error| {
+            ToolError::new(
+                ErrorName::UpstreamError,
+                format!("start {}: {error}", program.display()),
+            )
+        })?;
+    let stdout = child.stdout.take();
+    Ok(Owned { child, stdout })
+}
+
+impl Owned {
+    /// Its process ID, which is its process group's, until it has been reaped.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    /// How it exited, once it has; one that has is reaped.
+    pub(crate) fn exited(&mut self) -> Option<ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+
+    /// How it exits, once it has, which reaps it. Unbounded: the caller waits on it beside
+    /// something with a deadline.
+    pub(crate) async fn ended(&mut self) -> Result<ExitStatus, String> {
+        self.child
+            .wait()
+            .await
+            .map_err(|error| format!("wait for process {:?}: {error}", self.child.id()))
+    }
+
+    /// Sends its process group `SIGTERM`, waits `grace` for it to exit, then sends
+    /// `SIGKILL` and reaps it within `OWNED_REAP`. The child is still unreaped while it is
+    /// signalled, so its group ID can't belong to another group.
+    pub(crate) async fn stop(&mut self, grace: Duration) -> Result<(), String> {
+        if self.exited().is_some() {
+            return Ok(());
+        }
+        let Some(group) = self.pid().and_then(|pid| Pid::from_raw(pid.cast_signed())) else {
+            return Ok(());
+        };
+        // It may have exited since, so a missing group is fine.
+        kill_process_group(group, Signal::TERM).ok();
+        if tokio::time::timeout(grace, self.child.wait()).await.is_ok() {
+            return Ok(());
+        }
+        kill_process_group(group, Signal::KILL).ok();
+        let pid = group.as_raw_pid();
+        match tokio::time::timeout(OWNED_REAP, self.child.wait()).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(format!("reap process {pid}: {error}")),
+            Err(_) => Err(format!(
+                "process {pid} didn't exit within {OWNED_REAP:?} of SIGKILL"
+            )),
+        }
     }
 }
 
@@ -731,5 +840,67 @@ mod tests {
         }
         drop(call);
         grandchild.assert_dead().await;
+    }
+
+    /// Whether process `pid` has exited, as `/proc` shows it, within a second.
+    async fn gone(pid: &str) -> bool {
+        for _ in 0..50 {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            if stat
+                .rsplit_once(") ")
+                .is_none_or(|(_, rest)| rest.starts_with(['Z', 'X']))
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    /// A child that ignores `SIGTERM`, as its child does, gets `SIGKILL` after the grace,
+    /// with its whole group; it has exactly the environment `Exact` gives.
+    #[tokio::test]
+    async fn an_owned_child_gets_its_environment_and_its_group_is_stopped() {
+        let dir = crate::test_support::fresh_dir("runner-owned");
+        let log = std::fs::File::create(dir.join("log")).unwrap();
+        let script = "trap '' TERM; sleep 30 & echo \"$! ${OWNED_SET-unset} ${HOME-unset}\"; while :; do sleep 0.05; done";
+        let set = [("OWNED_SET", OsString::from("given"))];
+        let env = Exact {
+            set: &set,
+            remove: &["HOME"],
+        };
+        let args = ["-c".to_owned(), script.to_owned()];
+        let mut child = owned(Path::new("/bin/sh"), &args, env, log, true).unwrap();
+        let mut line = String::new();
+        let stdout = child.stdout.take().unwrap();
+        tokio::io::AsyncBufReadExt::read_line(&mut tokio::io::BufReader::new(stdout), &mut line)
+            .await
+            .unwrap();
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields[1..], ["given", "unset"], "{line}");
+        let started = tokio::time::Instant::now();
+        child.stop(Duration::from_millis(200)).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(child.exited().is_some());
+        assert!(
+            gone(fields[0]).await,
+            "the group's other process outlived the stop"
+        );
+        child.stop(Duration::from_millis(200)).await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_owned_child_gives_its_exit_status() {
+        let dir = crate::test_support::fresh_dir("runner-owned-exit");
+        let log = std::fs::File::create(dir.join("log")).unwrap();
+        let env = Exact {
+            set: &[],
+            remove: &[],
+        };
+        let args = ["-c".to_owned(), "exit 3".to_owned()];
+        let mut child = owned(Path::new("/bin/sh"), &args, env, log, false).unwrap();
+        assert_eq!(child.ended().await.unwrap().code(), Some(3));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

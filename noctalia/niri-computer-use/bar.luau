@@ -1,6 +1,7 @@
 --!nonstrict
 -- The bar capsule: a robot that is dim while no agent holds the desktop, and
 -- breathes in the accent colour while one drives it, with the agent's name.
+-- It also shows, dim, while agents work only in background desktops.
 -- Click opens the panel; right-click stops agents, or resumes them.
 
 local look = require("./lib/look.luau")
@@ -49,7 +50,12 @@ local function tooltip(status: string): string
   elseif #agents > 0 then
     table.insert(lines, tr("bar.agents", { n = #agents }))
   end
-  table.insert(lines, tr(if status == "stopped" then "bar.hint_resume" else "bar.hint_stop"))
+  local working = desk.working(view.background or {})
+  if working > 0 then
+    table.insert(lines, tr("bar.background", { n = working }))
+  end
+  local stopped = status == "stopped" or desk.anyStopped(view.background or {})
+  table.insert(lines, tr(if stopped then "bar.hint_resume" else "bar.hint_stop"))
   return table.concat(lines, "\n")
 end
 
@@ -61,7 +67,8 @@ local function render()
     barWidget.setVisible(false)
     return
   end
-  barWidget.setVisible(status ~= "idle" or setting("show_when_idle", true))
+  local background = desk.working(view.background or {}) > 0
+  barWidget.setVisible(status ~= "idle" or background or setting("show_when_idle", true))
   local role = look.role(status)
   local color = if live then breathing(role) else role
   local children = { ui.glyph({ name = look.glyph(status), color = color }) }
@@ -87,7 +94,8 @@ function onClick()
 end
 
 function onRightClick()
-  actions.run(if view and view.stopped then "resume" else "stop")
+  local stopped = view and (view.stopped or desk.anyStopped(view.background or {}))
+  actions.run(if stopped then "resume" else "stop")
 end
 
 render()

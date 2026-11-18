@@ -32,7 +32,7 @@ use super::waiter::{Numbers, Update, View, Waiter, relaid_by};
 use crate::error::{ErrorName, ToolError};
 
 /// For connecting, the request's reply, and a tool waiting for the initial state.
-const DEADLINE: Duration = Duration::from_secs(2);
+pub(super) const DEADLINE: Duration = Duration::from_secs(2);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// Parse failures before the stream stops. Ordinary disconnects don't count.
 const PARSE_FAILURES: u32 = 2;
@@ -660,7 +660,7 @@ async fn read(
 
 /// Sends `Request::EventStream` and reads niri's `Handled` reply within the deadline. The
 /// error names match the per-request client's.
-async fn start(
+pub(super) async fn start(
     stream: &mut BufReader<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> Result<(), ToolError> {
     let upstream = |detail: String| ToolError::new(ErrorName::UpstreamError, detail);

@@ -26,6 +26,8 @@ export type Row = {
   ts: string,
   -- The folded calls' combinations, each call's apart: `Escape, comma · Escape, c`.
   detail: string?,
+  -- The workspace of the background desktop the call was made on, if any.
+  background: string?,
 }
 
 -- A key call that went through, with the combinations it pressed.
@@ -45,6 +47,7 @@ local function row(call: any): Row
     project = call.project,
     ts = call.ts,
     detail = nil,
+    background = call.background,
   }
 end
 

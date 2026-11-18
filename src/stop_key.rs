@@ -232,23 +232,60 @@ pub(crate) fn own_program() -> PathBuf {
 /// Reads niri `pid`'s start under `proc_root`, then its config, with `system` as the
 /// config niri falls back to.
 fn inspect(proc_root: &Path, pid: u32, system: &Path) -> Checked {
-    let started = match Started::read(proc_root, pid) {
-        Ok(started) => started,
-        Err(error) => return Checked::unknown(format!("read niri's process (PID {pid}): {error}")),
-    };
-    let main = match locate(&started, system) {
-        Ok(main) => main,
+    let config = match Config::of(proc_root, pid, system) {
+        Ok(config) => config,
         Err(error) => return Checked::unknown(error),
     };
-    let spawner = Spawner {
-        home: started.home.as_deref().map(Path::new),
-        child_home: started.home.as_deref(),
-        path: started.path.as_deref(),
-        cwd: started.cwd.as_deref(),
-    };
-    match scan(&main, spawner, &mut Host) {
-        Ok(scan) => scan.checked(&main),
+    match config.scan() {
+        Ok(scan) => scan.checked(&config.main),
         Err(error) => Checked::unknown(format!("{error}, so niri wouldn't load it as it is")),
+    }
+}
+
+/// The config file a running niri loaded, and what it was started with, which says how
+/// its includes resolve.
+#[derive(Debug)]
+pub(crate) struct Config {
+    main: PathBuf,
+    started: Started,
+}
+
+impl Config {
+    /// The config of niri `pid` under `proc_root`, found as niri 26.04 finds it, with
+    /// `system` as the config niri falls back to.
+    pub(crate) fn of(proc_root: &Path, pid: u32, system: &Path) -> Result<Self, String> {
+        let started = Started::read(proc_root, pid)
+            .map_err(|error| format!("read niri's process (PID {pid}): {error}"))?;
+        let main = locate(&started, system)?;
+        Ok(Self { main, started })
+    }
+
+    /// The config of the niri `pid` on this machine.
+    pub(crate) fn of_niri(pid: u32) -> Result<Self, String> {
+        Self::of(Path::new("/proc"), pid, Path::new(SYSTEM_CONFIG))
+    }
+
+    /// The main config file.
+    pub(crate) fn main(&self) -> &Path {
+        &self.main
+    }
+
+    /// The files niri reads for it: the main one, then each it includes, in the order
+    /// niri reads them. An error is anything niri would refuse the config for, or a file
+    /// not read.
+    pub(crate) fn files(&self) -> Result<Vec<PathBuf>, String> {
+        self.scan().map(|scan| scan.files)
+    }
+
+    fn scan(&self) -> Result<Scan, String> {
+        let started = &self.started;
+        let spawner = Spawner {
+            home: started.home.as_deref().map(Path::new),
+            child_home: started.home.as_deref(),
+            path: started.path.as_deref(),
+            cwd: started.cwd.as_deref(),
+        };
+        scan(&self.main, spawner, &mut Host)
     }
 }
 
@@ -438,12 +475,13 @@ impl Bind {
 
 /// What the files hold: the binds niri ends up with, as it merges `binds` sections in
 /// document order with a later bind for a key replacing an earlier one; the first stop
-/// bind replaced that way and the file that replaced it; and how many files were read.
+/// bind replaced that way and the file that replaced it; and the files read, the main one
+/// first, then each it includes in the order niri reads them.
 #[derive(Debug, PartialEq, Eq)]
 struct Scan {
     binds: Vec<Bind>,
     replaced: Option<(Bind, PathBuf)>,
-    files: usize,
+    files: Vec<PathBuf>,
 }
 
 impl Scan {
@@ -473,7 +511,7 @@ impl Scan {
                 by.display()
             );
         }
-        let included = match self.files - 1 {
+        let included = match self.files.len().saturating_sub(1) {
             0 => String::new(),
             1 => " or the file it includes".to_owned(),
             more => format!(" or the {more} files it includes"),
@@ -498,7 +536,7 @@ fn scan(main: &Path, spawner: Spawner<'_>, disk: &mut impl Disk) -> Result<Scan,
         stack: vec![main.to_path_buf()],
         binds: Vec::new(),
         replaced: Vec::new(),
-        files: 1,
+        files: vec![main.to_path_buf()],
         environment: Environment::default(),
     };
     walk.file(main, &text)?;
@@ -592,7 +630,8 @@ struct Walk<'a, D> {
     binds: Vec<Written>,
     /// Binds a later bind for the same key replaced, each with the file that replaced it.
     replaced: Vec<(Written, PathBuf)>,
-    files: usize,
+    /// The files read so far, in the order they were read.
+    files: Vec<PathBuf>,
     environment: Environment,
 }
 
@@ -665,7 +704,7 @@ impl<D: Disk> Walk<'_, D> {
             }
             Err(error) => return Err(format!("read {}: {error}", path.display())),
         };
-        self.files += 1;
+        self.files.push(path.clone());
         self.stack.push(path.clone());
         let read = self.file(&path, &text);
         self.stack.pop();
@@ -819,6 +858,37 @@ include "~/extra/more.kdl"
                 detail: "no bind runs `niri-computer-use stop` in /c/config.kdl or the 2 files it includes"
                     .to_owned()
             }
+        );
+    }
+
+    /// A background desktop's start checks its rules file is among these.
+    #[test]
+    fn lists_the_files_read_in_the_order_niri_reads_them() {
+        let mut files = Files(BTreeMap::from([
+            (
+                PathBuf::from("/c/config.kdl"),
+                "include \"a.kdl\"\ninclude optional=true \"gone.kdl\"\ninclude \"niri-computer-use.kdl\"".to_owned(),
+            ),
+            (PathBuf::from("/c/a.kdl"), "include \"/abs/b.kdl\"".to_owned()),
+            (PathBuf::from("/abs/b.kdl"), String::new()),
+            (PathBuf::from("/c/niri-computer-use.kdl"), "// header".to_owned()),
+        ]));
+        let spawner = Spawner {
+            home: None,
+            child_home: None,
+            path: None,
+            cwd: None,
+        };
+        let scan = scan(Path::new("/c/config.kdl"), spawner, &mut files).unwrap();
+        assert_eq!(
+            scan.files,
+            [
+                "/c/config.kdl",
+                "/c/a.kdl",
+                "/abs/b.kdl",
+                "/c/niri-computer-use.kdl"
+            ]
+            .map(PathBuf::from)
         );
     }
 

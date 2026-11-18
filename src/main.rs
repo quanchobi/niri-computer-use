@@ -4,6 +4,7 @@ mod a11y;
 mod act;
 mod apps;
 mod audit;
+mod background;
 mod bridge;
 mod changes;
 mod cli;
@@ -69,6 +70,8 @@ pub(crate) struct Env {
     pub(crate) session_bus: Option<OsString>,
     /// Where the runtime directory, niri's socket and the display came from.
     pub(crate) discovery: discover::Sources,
+    /// In a background desktop's environment, its host side: none otherwise.
+    pub(crate) background: Option<std::sync::Arc<background::Host>>,
 }
 
 impl Env {
@@ -109,6 +112,7 @@ impl Env {
             (Err(_), found) => found.map_or_else(niri::Socket::unknown, niri::Socket::at),
         };
         let mut env = Self {
+            background: None,
             niri_socket,
             instance: session.instance,
             desktop: runner::Desktop::default(),
@@ -133,6 +137,37 @@ impl Env {
         env
     }
 
+    /// A background desktop's environment: this process's, with niri's socket, the display
+    /// and the session bus the nested niri's, the host's runtime directory, and the
+    /// desktop's programs found for `host`. `link` is its host side. The process's own
+    /// environment isn't changed, so the notifications it sends still reach the host's bus.
+    async fn nested(
+        host: &Self,
+        socket: &std::path::Path,
+        display: &str,
+        bus: &str,
+        link: std::sync::Arc<background::Host>,
+    ) -> Self {
+        let runtime_dir = host.runtime_dir.clone();
+        let env = Self::from_vars(
+            |name| match name {
+                "NIRI_SOCKET" => Some(socket.into()),
+                "WAYLAND_DISPLAY" => Some(display.into()),
+                "DBUS_SESSION_BUS_ADDRESS" => Some(bus.into()),
+                "XDG_RUNTIME_DIR" => runtime_dir.clone().map(PathBuf::into_os_string),
+                _ => std::env::var_os(name),
+            },
+            &discover::Roots::host(),
+            discover::Probe::Connect,
+        )
+        .await;
+        Self {
+            desktop: host.desktop.clone(),
+            background: Some(link),
+            ..env
+        }
+    }
+
     /// The file name of niri's socket, resolved when it could be, which names the compositor
     /// instance.
     pub(crate) fn instance(&self) -> Option<String> {
@@ -141,6 +176,12 @@ impl Env {
             .ok()
             .and_then(std::path::Path::file_name)
             .map(|name| name.to_string_lossy().into_owned())
+    }
+
+    /// The host's environment: a background desktop's host side, or this one on the live
+    /// desktop. The user's lock state, Noctalia and stop key belong to the host.
+    pub(crate) fn host(&self) -> &Self {
+        self.background.as_ref().map_or(self, |link| &link.env)
     }
 
     /// The Wayland display's socket: `WAYLAND_DISPLAY`, under `XDG_RUNTIME_DIR` unless it
@@ -194,9 +235,10 @@ enum Command {
     /// Print the readiness report, as JSON or, with `--check`, as one line per
     /// prerequisite.
     Status { check: bool },
-    /// Set the stop flag for this niri instance.
+    /// Set the stop flag for this niri instance and every background desktop started
+    /// from it.
     Stop,
-    /// Clear the stop flag.
+    /// Clear those stop flags.
     Resume,
     /// Clear the input-dirty marker after ending the input child and asking the human.
     Recover,
@@ -235,18 +277,22 @@ async fn main() -> ExitCode {
         env.discovery.runtime_dir = discover::Source::Discovered;
     }
     let given = session::Given::read(|name| std::env::var_os(name));
-    runner::pass_on(env.session_vars());
+    // A background desktop's server passes on its nested session's variables instead, once
+    // the desktop runs: only the first call counts.
+    if command != Some(Command::Serve) || !drives_background(&given) {
+        runner::pass_on(env.session_vars());
+    }
     if let Some(Command::Status { check }) = command {
         return status(&env, given, check).await;
     }
     let result = match command {
         Some(Command::Serve) => serve(env, given).await,
-        Some(Command::Stop) => RuntimeDir::of(&env).and_then(|runtime| {
-            runtime.stop().map_err(|error| {
-                format!("set the stop flag in {}: {error}", runtime.path().display())
-            })
-        }),
-        Some(Command::Resume) => RuntimeDir::of(&env).and_then(|runtime| runtime.resume()),
+        Some(Command::Stop) => {
+            RuntimeDir::of(&env).and_then(|runtime| control::flag::stop(&runtime))
+        }
+        Some(Command::Resume) => {
+            RuntimeDir::of(&env).and_then(|runtime| control::flag::resume(&runtime))
+        }
         Some(Command::Recover) => control::recover::run(&env).await,
         Some(Command::Watch) => watch::run(&env).await,
         Some(Command::Engine(start)) => engine::host::run(env, start.unscoped).await,
@@ -282,6 +328,7 @@ async fn status(env: &Env, given: session::Given, check: bool) -> ExitCode {
         confirm_lease: &settings.confirm_lease,
         tools: &settings.tools,
         shared: &settings.shared,
+        background: &settings.background,
         place: settings.place(),
         apps: &settings.apps,
         accessibility: &accessibility,
@@ -345,13 +392,23 @@ fn single(arg: &str) -> Option<Command> {
     })
 }
 
-/// Serves the client on stdin and stdout: through the shared engine in shared mode, unless
-/// it can't be reached or refuses this client, and standalone otherwise. A client that
-/// requires the shared engine is never served standalone: without it, every call fails with
+/// Whether the client's `serve` drives a background desktop, or fails every call for one
+/// it can't.
+fn drives_background(given: &session::Given) -> bool {
+    session::Settings::new(given.clone()).background.setting() != Ok(None)
+}
+
+/// Serves the client on stdin and stdout: from a background desktop of its own when its
+/// settings say so, else through the shared engine in shared mode, unless it can't be
+/// reached or refuses this client, and standalone otherwise. A client that requires the
+/// shared engine is never served standalone: without it, every call fails with
 /// `engine_unavailable` and tries the engine again, so the client is served once the cause
 /// is gone. Decided before the client's first byte is read.
 async fn serve(env: Env, given: session::Given) -> Result<(), String> {
     let settings = session::Settings::new(given.clone());
+    if let Some(setting) = settings.background.setting().transpose() {
+        return serve_background(env, given, &settings, setting).await;
+    }
     let sharing = settings.shared.setting();
     let reached = match (&settings.shared.env, sharing) {
         (Err(note), _) => Err((None, note.clone())),
@@ -377,7 +434,7 @@ async fn serve(env: Env, given: session::Given) -> Result<(), String> {
             cli::print_error(&format!(
                 "the shared engine is required, so every tool fails with engine_unavailable: {reason}"
             ));
-            return bridge::unavailable::Unavailable::new(tools, &reason, log)
+            return bridge::unavailable::Unavailable::shared(tools, &reason, log)
                 .run()
                 .await;
         };
@@ -389,6 +446,73 @@ async fn serve(env: Env, given: session::Given) -> Result<(), String> {
     }
     cli::print_error(&format!("serving this client standalone: {reason}"));
     standalone(env, settings, Some(reason)).await
+}
+
+/// Serves the client on stdin and stdout from the background desktop `setting` describes,
+/// started on the client's first call and torn down at its end, or on SIGTERM, SIGHUP or
+/// SIGINT, before the crash guardian exists or after. Without one, every call fails with
+/// `background_unavailable` and the reason: a server set to drive a background desktop
+/// never drives the live one.
+async fn serve_background(
+    env: Env,
+    given: session::Given,
+    settings: &session::Settings,
+    setting: Result<policy::background::Config, String>,
+) -> Result<(), String> {
+    let tools = background::listed(tools::Server::listed(settings));
+    let log = bridge::log::Log::new(&env, &tools);
+    let config = match setting {
+        Ok(config) => config,
+        Err(reason) => {
+            cli::print_error(&format!(
+                "the background desktop can't be used, so every tool fails with background_unavailable: {reason}"
+            ));
+            return bridge::unavailable::Unavailable::background(tools, &reason, log)
+                .run()
+                .await;
+        }
+    };
+    let desktop = std::sync::Arc::new(background::Desktop::new(env, given, config));
+    let target = bridge::Target::Background(std::sync::Arc::clone(&desktop));
+    let before = bridge::before::Before::new(tools);
+    let (served, signalled) = tokio::select! {
+        served = bridge::run(target, None, Some(before), log) => (served, None),
+        signal = terminated() => (Ok(()), Some(signal)),
+    };
+    let torn_down = desktop
+        .finish()
+        .await
+        .map_err(|error| format!("tear down the background desktop: {error}"));
+    if let Some(signal) = signalled {
+        // Returning would wait for the thread reading stdin, which the client keeps open.
+        cli::exit_at_once(match torn_down {
+            Ok(()) => format!("{signal}: the server ends"),
+            Err(error) => format!("{signal}: the server ends; {error}"),
+        });
+    }
+    match (served, torn_down) {
+        (Ok(()), torn_down) => torn_down,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(torn_down)) => Err(format!("{error}; {torn_down}")),
+    }
+}
+
+/// The first of SIGTERM, SIGHUP and SIGINT, by name; never when they can't be watched,
+/// which leaves them their default action.
+async fn terminated() -> &'static str {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut term), Ok(mut hangup), Ok(mut interrupt)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = term.recv() => "SIGTERM",
+        _ = hangup.recv() => "SIGHUP",
+        _ = interrupt.recv() => "SIGINT",
+    }
 }
 
 /// The engine's target and a link to it, or why there is none, with the target when trying

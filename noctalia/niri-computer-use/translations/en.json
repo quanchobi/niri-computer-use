@@ -110,7 +110,8 @@
     "agents": "Connected agents: {n}",
     "agents_outdated": "Connected agents: {n} · {old} on an old build",
     "hint_stop": "Click for details · right-click to stop agents",
-    "hint_resume": "Click for details · right-click to resume agents"
+    "hint_resume": "Click for details · right-click to resume agents",
+    "background": "Working in the background: {n}"
   },
   "panel": {
     "resume": "Resume",
@@ -130,7 +131,13 @@
     "agents_fewer": "Show fewer",
     "agents_old_one": "1 on an old build, restart it",
     "agents_old": "{n} on an old build, restart them",
-    "empty": "No calls on this desktop yet."
+    "empty": "No calls on this desktop yet.",
+    "background": "Background desktops",
+    "background_working": "{who} working",
+    "background_idle": "no agent",
+    "background_stopped": "stopped",
+    "background_on": "on {workspace}",
+    "agent_background": "in the background"
   },
   "time": {
     "now": "now",

@@ -11,6 +11,10 @@
 //! At its start, before it waits, it does the same for a marker a dead server left and
 //! nothing released: that server's own guardian died with it, as when a signal or the OOM
 //! killer ends a whole service, or couldn't finish. So the next server to start releases it.
+//!
+//! The guardian of a background desktop's engine runs in the nested session. After the
+//! releases, it tears the desktop down when the nested instance's record names its own
+//! server, which ended without doing so.
 
 use std::path::Path;
 use std::time::Duration;
@@ -22,7 +26,7 @@ use super::marker::{self, Found, Marker};
 use super::procs;
 use super::recover;
 use super::runtime::RuntimeDir;
-use crate::{Env, cli};
+use crate::{Env, background, cli};
 
 const PROC: &str = "/proc";
 
@@ -45,6 +49,19 @@ pub(crate) async fn run(env: &Env, server: u32) -> Result<(), String> {
     // Nothing else runs in this process: blocking until the server's end is the point.
     std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink())
         .map_err(|error| format!("watch server {server}: {error}"))?;
+    let released = after_server(env, server).await;
+    let torn_down = background::teardown::guarded(env, server)
+        .await
+        .map_err(|error| format!("tear down server {server}'s background desktop: {error}"));
+    match (released, torn_down) {
+        (Ok(()), torn_down) => torn_down,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(torn_down)) => Err(format!("{error}; {torn_down}")),
+    }
+}
+
+/// Releases what the marker its server `server` wrote names, within the deadline.
+async fn after_server(env: &Env, server: u32) -> Result<(), String> {
     // A server without a runtime directory can't have written a marker.
     let Ok(runtime) = RuntimeDir::of(env) else {
         return Ok(());

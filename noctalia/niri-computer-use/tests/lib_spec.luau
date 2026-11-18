@@ -145,6 +145,35 @@ t.group("desk", function()
     t.eq(desk.status(d, NOW), "idle")
   end)
 
+  t.test("background desktops are listed with their holders, apart from the user's desktop", function()
+    local d = desk.new()
+    desk.feed(d, { event = "hello", format = 1 }, "", NOW, tr)
+    desk.feed(d, stateLine(nil), "", NOW, tr)
+    local line = stateLine(nil)
+    line.background = {
+      { instance = "niri.wayland-2.42.sock", workspace = "agent-shop", bus = "private", lease = lease("claude-code/4711"), stopped = false },
+      { instance = "niri.wayland-3.43.sock", bus = "host", stopped = true },
+      { workspace = "no instance" },
+    }
+    t.eq(kinds(desk.feed(d, line, "", NOW, tr)), "", "a background lease isn't the user's desktop taken")
+    t.eq(desk.status(d, NOW), "idle")
+    local view = desk.view(d, NOW)
+    t.eq(#view.background, 2)
+    t.eq(view.background[1].lease.client, "Claude Code")
+    t.eq(view.background[1].lease.project, "shop")
+    t.eq(view.background[2].workspace, "niri.wayland-3.43.sock", "a desktop without a workspace goes by its instance")
+    t.eq(view.background[2].lease, nil)
+    t.eq(desk.working(view.background), 1)
+    t.eq(desk.anyStopped(view.background), true)
+    desk.feed(d, { event = "action", tool = "click", session = "claude-code/4711", background = "agent-shop" }, "", NOW, tr)
+    desk.feed(d, { event = "action", tool = "click", session = "pi/7" }, "", NOW, tr)
+    t.eq(d.calls[1].background, "agent-shop")
+    t.eq(d.calls[2].background, nil)
+    t.eq(feed.rows(d.calls, tr)[1].background, "agent-shop")
+    desk.feed(d, stateLine(nil), "", NOW, tr)
+    t.eq(#desk.view(d, NOW).background, 0, "a state without background desktops has none")
+  end)
+
   t.test("watch's error before hello keeps its first lines, and not the last watch's", function()
     local d = desk.new()
     -- The service carries the last watch's error over until the new one says hello.

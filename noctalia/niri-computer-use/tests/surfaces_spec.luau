@@ -78,6 +78,28 @@ t.group("bar", function()
     bar.call("onClick")
     t.eq(host.toggled[1], "ayagmar/niri-computer-use:panel")
   end)
+
+  t.test("shows while an agent works only in the background, and says so", function()
+    local host = desktop()
+    host.config.show_when_idle = false
+    local bar = env.start(host, "bar.luau")
+    host.event({ event = "hello", format = 1 })
+    local working = {
+      instance = "niri.wayland-2.42.sock",
+      workspace = "agent-shop",
+      bus = "private",
+      lease = { session = "pi/9", since = "2026-10-17T15:05:55.000Z", pending = false },
+      stopped = false,
+    }
+    host.event({ event = "state", stopped = false, input_dirty = false, background = { working } })
+    t.eq(host.bar.visible, true)
+    t.eq(host.updateInterval, 1000, "the bar breathes only while the user's desktop is driven")
+    t.ok(host.bar.tooltip:find("Working in the background: 1", 1, true), host.bar.tooltip)
+    working.stopped = true
+    host.event({ event = "state", stopped = false, input_dirty = false, background = { working } })
+    bar.call("onRightClick")
+    t.ok(host.commands[1].command:find('exec "$b" resume', 1, true), host.commands[1].command)
+  end)
 end)
 
 t.group("panel", function()
@@ -417,6 +439,44 @@ t.group("panel", function()
     host.nowMs += 1
     host.event({ event = "alive" })
     t.eq(button(host, "Stop"), nil, "Stop stays once the agent can no longer be taking the desktop back")
+  end)
+
+  t.test("lists the background desktops, who works in each, and their calls, with Stop and Resume reaching them", function()
+    local host = desktop()
+    local panel = env.start(host, "panel.luau")
+    panel.call("onOpen", {})
+    host.event({ event = "hello", format = 1 })
+    local working = {
+      instance = "niri.wayland-2.42.sock",
+      workspace = "agent-shop",
+      bus = "private",
+      lease = { session = "claude-code/4711", since = "2026-10-17T15:05:55.000Z", pending = false, project = "shop" },
+      stopped = false,
+    }
+    local idle = { instance = "niri.wayland-3.43.sock", workspace = "agent-site", bus = "host", lease = nil, stopped = false }
+    host.event({
+      event = "state",
+      stopped = false,
+      input_dirty = false,
+      clients = { { pid = 4711, agent = "claude", project = "shop", replaced = false } },
+      background = { working, idle },
+    })
+    t.eq(host.state.desk.status, "idle", "a background desktop isn't the user's")
+    local texts = host.texts(host.panelTree)
+    t.ok(has(texts, "Background desktops"), table.concat(texts, " | "))
+    t.ok(has(texts, "agent-shop") and has(texts, "agent-site"), table.concat(texts, " | "))
+    t.ok(has(texts, "Claude Code in shop working"), table.concat(texts, " | "))
+    t.ok(has(texts, "no agent"), table.concat(texts, " | "))
+    t.ok(has(texts, "in the background"), "the agent's row doesn't say it works in the background")
+    host.event({ event = "action", ts = "2026-10-17T15:06:00.000Z", session = "claude-code/4711", tool = "click", background = "agent-shop", accepted = true })
+    t.ok(has(host.texts(host.panelTree), "Claude Code · on agent-shop"), table.concat(host.texts(host.panelTree), " | "))
+    button(host, "Stop").props.onClick()
+    t.ok(host.commands[1].command:find('exec "$b" stop', 1, true), host.commands[1].command)
+    working.stopped = true
+    host.event({ event = "state", stopped = false, input_dirty = false, background = { working, idle } })
+    t.ok(has(host.texts(host.panelTree), "Claude Code in shop working · stopped"), table.concat(host.texts(host.panelTree), " | "))
+    button(host, "Resume").props.onClick()
+    t.ok(host.commands[2].command:find('exec "$b" resume', 1, true), host.commands[2].command)
   end)
 end)
 

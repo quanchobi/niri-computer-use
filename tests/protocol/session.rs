@@ -134,7 +134,9 @@ impl NiriProcess {
         to: &Path,
     ) -> (Self, String) {
         let program = fixture.path("niri");
-        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &program).unwrap();
+        if !program.exists() {
+            std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &program).unwrap();
+        }
         let display_socket = fixture.path(&format!("run/{display}"));
         // The fixture's own display, served by the test's process instead.
         std::fs::remove_file(&display_socket).ok();

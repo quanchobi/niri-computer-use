@@ -4,10 +4,14 @@
 //! `LockedHint` for `XDG_SESSION_ID`, then Noctalia's `locked`, and locked wins.
 //!
 //! niri sets logind's locked hint on lock and unlock when it runs as the session instance
-//! (`src/niri.rs` at v26.04), whichever `ext_session_lock` client locks the screen.
+//! (`src/niri.rs` at v26.04), whichever `ext_session_lock` client locks the screen. A
+//! background desktop's nested niri runs without `--session` and has no lock screen of
+//! its own, so its lock state is the host's: logind's hint for the host niri's session,
+//! and the host's Noctalia.
 
 pub(crate) mod cleanup;
 pub(crate) mod desk;
+pub(crate) mod flag;
 pub(crate) mod guard;
 pub(crate) mod lease;
 pub(crate) mod marker;
@@ -61,10 +65,13 @@ impl Lock {
 }
 
 /// Where the lock state is read: logind's hint for niri's session, and Noctalia's status
-/// when Noctalia is installed.
+/// when Noctalia is installed. In a background desktop's environment both are read on the
+/// host, since the user locks the host's screen.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LockSources<'a> {
     pub(crate) env: &'a Env,
+    /// Whether Noctalia serves `env`'s desktop. A background desktop reads the host's
+    /// Noctalia whenever the host has one installed.
     pub(crate) noctalia: bool,
 }
 
@@ -72,15 +79,21 @@ impl LockSources<'_> {
     /// The lock state from reads started now, side by side: Noctalia's status and logind's
     /// hint.
     pub(crate) async fn read(self) -> Lock {
+        let (env, noctalia) = self
+            .env
+            .background
+            .as_ref()
+            .map_or((self.env, self.noctalia), |link| {
+                (&link.env, link.env.desktop.noctalia.is_some())
+            });
         let status = async {
-            if self.noctalia {
-                noctalia::status(self.env).await.ok()
+            if noctalia {
+                noctalia::status(env).await.ok()
             } else {
                 None
             }
         };
-        let (status, logind) =
-            tokio::join!(status, logind(&self.env.niri_socket, &self.env.desktop));
+        let (status, logind) = tokio::join!(status, logind(&env.niri_socket, &env.desktop));
         lock(logind, status.as_ref())
     }
 }
@@ -247,5 +260,50 @@ mod tests {
                 "{id:?}: {error}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_background_desktop_has_the_hosts_lock_state() {
+        let dir = crate::test_support::fresh_dir("lock-host");
+        let host = Env {
+            runtime_dir: Some(dir.clone()),
+            wayland_display: Some("wayland-1".into()),
+            desktop: Desktop {
+                noctalia: Some("/usr/bin/noctalia".into()),
+                ..Desktop::default()
+            },
+            ..Env::default()
+        };
+        crate::test_support::locked_noctalia(&host);
+        let link = std::sync::Arc::new(crate::background::Host {
+            env: host.clone(),
+            workspace: crate::background::plan::workspace_name(Some("shop"), 7, &[]),
+            nested_instance: "niri.wayland-2.9.sock".to_owned(),
+        });
+        let alone = Env {
+            runtime_dir: Some(dir.clone()),
+            wayland_display: Some("wayland-2".into()),
+            ..Env::default()
+        };
+        let nested = Env {
+            background: Some(link),
+            ..alone.clone()
+        };
+        let read = |env| async move {
+            LockSources {
+                env,
+                noctalia: false,
+            }
+            .read()
+            .await
+        };
+        let lock = read(&nested).await;
+        assert_eq!(
+            (lock.state, lock.source),
+            (LockState::Locked, LockSource::Noctalia)
+        );
+        let own = read(&alone).await;
+        assert_eq!(own.state, LockState::Unknown, "the nested niri has none");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

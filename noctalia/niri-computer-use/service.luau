@@ -182,7 +182,7 @@ function onIpc(event: string, _payload)
   elseif event == "resume" then
     resume()
   elseif event == "toggle" then
-    if model.stopped then
+    if model.stopped or desk.anyStopped(model.background) then
       resume()
     else
       stop()

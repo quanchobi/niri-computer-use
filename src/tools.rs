@@ -2470,6 +2470,7 @@ mod tests {
             confirm_lease: None,
             tools: tools.map(Into::into),
             shared: None,
+            background: None,
             home: None,
             path: Some(crate::test_support::NO_PROGRAMS.into()),
             policy: Source::Missing,
@@ -2507,6 +2508,34 @@ mod tests {
                 .tool_router
                 .has_route("noctalia")
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_background_desktop_lists_neither_of_the_host_shells_tools() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::test_support::fresh_dir("noctalia-background");
+        let noctalia = dir.join("noctalia");
+        std::fs::write(&noctalia, "").unwrap();
+        std::fs::set_permissions(&noctalia, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = Env {
+            desktop: crate::runner::Desktop::find(dir.as_os_str()),
+            ..Env::default()
+        };
+        let nested = engine(Env {
+            desktop: host.desktop.clone(),
+            background: Some(Arc::new(crate::background::Host {
+                env: host,
+                workspace: crate::background::plan::workspace_name(Some("shop"), 7, &[]),
+                nested_instance: "niri.wayland-2.9.sock".to_owned(),
+            })),
+            ..Env::default()
+        });
+        let unrestricted = server(&nested, true, None);
+        for tool in ["shell_panel", "noctalia"] {
+            assert!(!unrestricted.tool_router.has_route(tool), "{tool}");
+        }
+        assert!(unrestricted.tool_router.has_route("desktop_state"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

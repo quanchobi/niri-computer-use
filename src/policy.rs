@@ -1,11 +1,14 @@
 //! The policy file, `$XDG_CONFIG_HOME/niri-computer-use/policy.toml`, and the decisions it
 //! feeds: launch presets, the app deny list, where screenshots may be saved, whether a
 //! server may take the lease and whether the user must allow it first, which niri actions
-//! need `unrestricted = true`, and which output setups the pointer tools may run on. Also
-//! the Noctalia panels `shell_panel` may open, which no file changes.
+//! need `unrestricted = true`, which output setups the pointer tools may run on, and
+//! whether `serve` drives a background desktop (`background`). Also the Noctalia panels
+//! `shell_panel` may open, which no file changes.
 //! Everything here is pure; the caller reads the file. The preset rules catch common
 //! mistakes. They are a guardrail, not a boundary: a wrapper script or a symlink with
 //! another name gets past any list.
+
+pub(crate) mod background;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -134,6 +137,9 @@ pub(crate) struct Policy {
     /// takes the lease; unset, it does.
     #[serde(default)]
     pub(crate) notify_on_lease: Option<bool>,
+    /// Drives a background desktop of the server's own instead of the live desktop.
+    #[serde(default)]
+    pub(crate) background: Option<background::Table>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

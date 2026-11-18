@@ -64,3 +64,40 @@ launch_desktop_entries = true
 The server then starts an app's own `Exec` line, the command its menu entry runs, without a shell, under the same rules as presets. It takes only apps installed for the whole system, such as those under `/usr/share`; an app installed in your home directory, as `flatpak install --user` does, needs a preset. See [`launch_desktop_entries`](../../concepts/configuration/#launch_desktop_entries) for what it refuses.
 
 To allow only a few apps, list them as [presets](../../concepts/configuration/#preset) instead. [`unrestricted`](../../concepts/configuration/#unrestricted), or `NIRI_COMPUTER_USE_UNRESTRICTED=1` in a client's server settings, goes further: that client's agent can then start any program through `niri_action`'s `Spawn`.
+
+## Work in a background desktop
+
+By default the agent works on your desktop. To give it a desktop of its own instead, a nested niri on a workspace of its own that starts at the agent's first call and closes when its session ends, set up the rules file once, then turn background mode on.
+
+While a background desktop starts, the server writes a window rule to `niri-computer-use.kdl` beside your niri config, which opens the nested niri's window on its workspace without focusing it. Create the file first: niri 26.04 refuses a whole config that includes a file that doesn't exist.
+
+```sh
+touch ~/.config/niri/niri-computer-use.kdl
+```
+
+Then add this line at the end of `~/.config/niri/config.kdl`, after your own window rules, so the server's rule wins:
+
+```kdl
+include "niri-computer-use.kdl"
+```
+
+`niri validate` checks it. The server never edits `config.kdl`. Between starts the file holds only a comment, and the server never removes it.
+
+Then turn it on, for every client, with this table in `~/.config/niri-computer-use/policy.toml`:
+
+```toml
+[background]
+```
+
+or for one client, with `NIRI_COMPUTER_USE_BACKGROUND=private` in that client's server settings, or `host` for your session bus. Restart the agent's session. With the variable set, `status --check` shows the lines background mode adds:
+
+```sh
+NIRI_COMPUTER_USE_BACKGROUND=private ~/.local/bin/niri-computer-use status --check
+```
+
+```text
+✓ background rules file: /home/you/.config/niri/niri-computer-use.kdl, included by /home/you/.config/niri/config.kdl
+✓ dbus-daemon: /usr/bin/dbus-daemon, for the private bus
+```
+
+The agent's first call starts the desktop on a new workspace named after its project, such as `agent-niri-computer-use`, without moving your focus. Switch to that workspace to watch. The agent starts apps there as on your desktop, from presets and desktop entries. With the private bus, those apps get no keyring or portals, and a flatpak app's file dialog cancels: give a file to an app as an argument in its preset, or use `bus = "host"`. See [`[background]`](../../concepts/configuration/#background) for the settings and [Safety](../../concepts/safety/#background-desktops) for what a background desktop keeps apart and what it doesn't.

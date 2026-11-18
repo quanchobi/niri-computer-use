@@ -18,6 +18,7 @@ use std::io::{Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::process::ExitStatus;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -35,7 +36,7 @@ use crate::engine::hello::{self, Exe, Hello, Refusal, Reply};
 use crate::engine::host::{LOCK, LOG, RUNTIME_DIR_DISCOVERED, SOCKET, UNSCOPED};
 use crate::error::{ErrorName, ToolError};
 use crate::session::{Given, LineLimit, MAX_LINE};
-use crate::{Env, cli, runner};
+use crate::{Env, background, cli, runner};
 use before::Before;
 use client::{Ended, Waiting, Writer};
 use envelope::Message;
@@ -70,18 +71,27 @@ const MAX_SCOPE_ERROR: u64 = 2048;
 /// Why a bridge's second or third start skips `systemd-run`.
 const EARLIER: &str = "the engine an earlier start ran through systemd-run never listened";
 
-/// The engine a bridge reaches, the hello it sends, and the runtime directory the bridge
-/// discovered, which `systemd-run` needs beyond the bridge's environment.
+/// The engine a bridge reaches: the niri instance's shared engine, or the engine of the
+/// server's own background desktop, in its own process.
 #[derive(Debug)]
-pub(crate) struct Target {
+pub(crate) enum Target {
+    Shared(Shared),
+    /// Started on the first call that reaches it.
+    Background(Arc<background::Desktop>),
+}
+
+/// The shared engine a bridge reaches, the hello it sends, and the runtime directory the
+/// bridge discovered, which `systemd-run` needs beyond the bridge's environment.
+#[derive(Debug)]
+pub(crate) struct Shared {
     runtime: RuntimeDir,
     hello: Vec<u8>,
     discovered_runtime_dir: Option<OsString>,
 }
 
 impl Target {
-    /// The engine of the niri instance `env` names, for a client whose environment gave
-    /// `given`.
+    /// The shared engine of the niri instance `env` names, for a client whose environment
+    /// gave `given`.
     pub(crate) fn new(env: &Env, given: Given) -> Result<Self, String> {
         let runtime = RuntimeDir::of(env)?;
         let niri = env.instance.socket().map_err(Clone::clone)?;
@@ -96,11 +106,20 @@ impl Target {
         let mut line =
             serde_json::to_vec(&hello).map_err(|error| format!("write the hello: {error}"))?;
         line.push(b'\n');
-        Ok(Self {
+        Ok(Self::Shared(Shared {
             runtime,
             hello: line,
             discovered_runtime_dir: discovered_runtime_dir(env),
-        })
+        }))
+    }
+
+    /// The engine, as an error names it, with its PID when known.
+    fn engine(&self, pid: Option<u32>) -> String {
+        let engine = match self {
+            Self::Shared(_) => "the shared engine",
+            Self::Background(_) => "the background desktop's engine",
+        };
+        pid.map_or_else(|| engine.to_owned(), |pid| format!("{engine} (PID {pid})"))
     }
 }
 
@@ -156,6 +175,19 @@ enum Failed {
     Retry(String),
 }
 
+impl Failed {
+    fn detail(self) -> String {
+        match self {
+            Self::Absent(detail)
+            | Self::Refused(detail)
+            | Self::Never(detail)
+            | Self::OtherBuild(detail)
+            | Self::Exiting(detail)
+            | Self::Retry(detail) => detail,
+        }
+    }
+}
+
 /// Why `connect` reached no engine.
 #[derive(Debug)]
 pub(crate) enum Unreached {
@@ -166,18 +198,37 @@ pub(crate) enum Unreached {
     Never(String),
     /// Anything else.
     Other(String),
+    /// The background desktop or its engine didn't start, or its engine refused this
+    /// bridge; the next call tries again.
+    Background(String),
 }
 
 impl Unreached {
     pub(crate) fn detail(self) -> String {
         match self {
-            Self::OtherBuild(detail) | Self::Never(detail) | Self::Other(detail) => detail,
+            Self::OtherBuild(detail)
+            | Self::Never(detail)
+            | Self::Other(detail)
+            | Self::Background(detail) => detail,
         }
     }
 }
 
-/// Reaches the engine, starting one if there is none, within `BUDGET`.
+/// Reaches the engine: the shared engine, starting one if there is none, within `BUDGET`,
+/// or the background desktop's, starting the desktop if it doesn't run.
 pub(crate) async fn connect(target: &Target) -> Result<Link, Unreached> {
+    match target {
+        Target::Shared(shared) => connect_shared(shared).await,
+        Target::Background(desktop) => {
+            let (stream, hello) = desktop.connect().await.map_err(Unreached::Background)?;
+            say_hello_on(stream, &hello)
+                .await
+                .map_err(|failed| Unreached::Background(failed.detail()))
+        }
+    }
+}
+
+async fn connect_shared(target: &Shared) -> Result<Link, Unreached> {
     let deadline = Instant::now() + BUDGET;
     let mut starts = 0;
     let mut retry = RETRY_FIRST;
@@ -216,7 +267,7 @@ pub(crate) async fn connect(target: &Target) -> Result<Link, Unreached> {
     }
 }
 
-async fn say_hello(target: &Target) -> Result<Link, Failed> {
+async fn say_hello(target: &Shared) -> Result<Link, Failed> {
     let socket = target.runtime.path().join(SOCKET);
     let stream = match tokio::time::timeout(CONNECT, UnixStream::connect(&socket)).await {
         Ok(Ok(stream)) => stream,
@@ -228,6 +279,12 @@ async fn say_hello(target: &Target) -> Result<Link, Failed> {
             )));
         }
     };
+    say_hello_on(stream, &target.hello).await
+}
+
+/// Sends the hello `sent` on `stream`, a connection to an engine, and reads the engine's
+/// answer.
+async fn say_hello_on(stream: UnixStream, sent: &[u8]) -> Result<Link, Failed> {
     // The process that listens: the engine.
     let engine = stream
         .peer_cred()
@@ -239,7 +296,7 @@ async fn say_hello(target: &Target) -> Result<Link, Failed> {
     let mut input = BufReader::new(input);
     let exchange = async {
         output
-            .write_all(&target.hello)
+            .write_all(sent)
             .await
             .map_err(|error| error.to_string())?;
         match read_line(&mut input, hello::MAX_LINE).await {
@@ -346,7 +403,7 @@ impl Link {
 /// that engine why it has no scope of its own. The runtime directory is created first: it
 /// may never have existed, or have been removed since, which ended the engine this bridge
 /// served.
-async fn start(target: &Target, deadline: Instant, scoped: bool) -> Result<(), String> {
+async fn start(target: &Shared, deadline: Instant, scoped: bool) -> Result<(), String> {
     let runtime = target.runtime.path();
     target
         .runtime
@@ -391,7 +448,7 @@ async fn start(target: &Target, deadline: Instant, scoped: bool) -> Result<(), S
 /// no engine in a scope of its own: `systemd-run`'s exit and what it wrote, or `None` when
 /// one listens or still starts.
 async fn start_scoped(
-    target: &Target,
+    target: &Shared,
     log: &File,
     path: &Path,
     socket: &Path,
@@ -831,11 +888,19 @@ impl Relay {
             Err(unreached) => {
                 // An engine of another build says what to do; a retry helps only once it has
                 // ended. None helps at all when no engine can ever be reached.
-                let detail = match unreached {
-                    Unreached::OtherBuild(detail) | Unreached::Never(detail) => detail,
-                    Unreached::Other(detail) => format!("{detail}; the next call tries again"),
-                };
-                Err(ToolError::new(ErrorName::EngineUnavailable, detail))
+                Err(match unreached {
+                    Unreached::OtherBuild(detail) | Unreached::Never(detail) => {
+                        ToolError::new(ErrorName::EngineUnavailable, detail)
+                    }
+                    Unreached::Other(detail) => ToolError::new(
+                        ErrorName::EngineUnavailable,
+                        format!("{detail}; the next call tries again"),
+                    ),
+                    Unreached::Background(detail) => ToolError::new(
+                        ErrorName::BackgroundUnavailable,
+                        format!("{detail}; the next call tries again"),
+                    ),
+                })
             }
         })
     }
@@ -884,14 +949,17 @@ impl Relay {
     }
 
     fn lost_error(&self, how: &str) -> ToolError {
-        let engine = self.engine.as_ref().map_or_else(
-            || "the shared engine".to_owned(),
-            |engine| format!("the shared engine (PID {})", engine.pid),
-        );
+        let engine = self
+            .target
+            .engine(self.engine.as_ref().map(|engine| engine.pid));
+        let next = match self.target {
+            Target::Shared(_) => "The next call reaches a new engine",
+            Target::Background(_) => "The next call reaches the engine again in a new session",
+        };
         ToolError::new(
             ErrorName::EngineLost,
             format!(
-                "{engine} ended ({how}); what a call in flight did is unknown. The next call reaches a new engine, where this session holds no lease"
+                "{engine} ended ({how}); what a call in flight did is unknown. {next}, where this session holds no lease"
             ),
         )
     }
@@ -992,11 +1060,11 @@ mod tests {
         let (input, output) = engine.into_split();
         let (writer, writer_failed) = Writer::start(stdout);
         Relay {
-            target: Target {
+            target: Target::Shared(Shared {
                 runtime: RuntimeDir::of(&crate::test_support::niri_env(dir)).unwrap(),
                 hello: Vec::new(),
                 discovered_runtime_dir: None,
-            },
+            }),
             engine: Some(Link::new(1, BufReader::new(input), output)),
             before: None,
             in_flight: BTreeMap::new(),

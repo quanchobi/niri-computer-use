@@ -98,6 +98,9 @@ pub(crate) enum ErrorName {
     EngineLost,
     /// The bridge couldn't reach or start a shared engine for this call.
     EngineUnavailable,
+    /// The background desktop this server is set to drive couldn't be used: its setting is
+    /// wrong, it conflicts with another, or it failed to start for this call.
+    BackgroundUnavailable,
 }
 
 /// A failure, serialized as `{"error": <name>, "detail": <upstream detail>}`, with
