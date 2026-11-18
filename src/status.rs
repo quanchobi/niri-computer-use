@@ -8,6 +8,7 @@ use niri_ipc::Output;
 use serde::Serialize;
 
 use crate::audit::{Audit, AuditStatus};
+use crate::background::rules::{self, RulesStatus};
 use crate::control::desk::LeaseStatus;
 use crate::control::marker::{self, Found};
 use crate::control::runtime::RuntimeDir;
@@ -17,6 +18,7 @@ use crate::error::ToolError;
 use crate::niri::events::StreamState;
 use crate::niri::{self, version::Compat};
 use crate::noctalia::{self, Presence};
+use crate::policy::background::{Background, Bus, ConfigStatus};
 use crate::policy::{
     self, Facts, Loaded, PolicyStatus, Shared, SharedStatus, Switch, SwitchStatus, Tools,
     ToolsStatus,
@@ -46,14 +48,18 @@ pub(crate) struct Status {
     /// Whether the stop flag is set for this niri instance.
     stop: bool,
     /// Whether niri's config binds a key to `niri-computer-use stop`: `bound`,
-    /// `not_found`, or `unknown` when that can't be told for sure.
+    /// `not_found`, or `unknown` when that can't be told for sure. For a background
+    /// desktop, the host niri's config, whose key stops its agent too.
     stop_key: StopKey,
     /// The file with the bind, the file read, or why the answer is unknown.
     stop_key_detail: String,
     /// The input-dirty marker, if there is one.
     input_dirty: Option<Found>,
+    /// The host's lock state, for a background desktop too.
     lock: Lock,
     outputs: OutputSupport,
+    /// The host's Noctalia, for a background desktop too, though its tools aren't listed
+    /// there: its status is read for the lock state.
     noctalia: Presence,
     /// Why Noctalia counts as not running, when it's installed.
     noctalia_error: Option<ToolError>,
@@ -81,9 +87,31 @@ pub(crate) struct Status {
     /// Whether this client is served by the shared engine, standalone, or only by the
     /// shared engine.
     shared: SharedStatus,
+    /// Whether this server drives a background desktop, the host's rules file, and the
+    /// desktop once it runs.
+    background: BackgroundReport,
     binaries: BTreeMap<&'static str, bool>,
     /// Where `loginctl` and `noctalia` were found at startup, for every session alike.
     desktop_programs: runner::Desktop,
+}
+
+/// What `status` reports about background mode.
+#[derive(Debug, Serialize)]
+struct BackgroundReport {
+    #[serde(flatten)]
+    config: ConfigStatus,
+    /// The host's rules file and whether the host niri's config includes it; null while
+    /// background mode is off.
+    rules: Option<RulesStatus>,
+    /// The `dbus-daemon` the private bus runs, found in the desktop's search path; null
+    /// when none is found there, and while background mode is off or uses the host's bus.
+    dbus_daemon: Option<std::path::PathBuf>,
+    /// The host workspace the nested niri's window is on, once the desktop runs.
+    workspace: Option<String>,
+    /// The host niri's instance, once the desktop runs.
+    host_instance: Option<String>,
+    /// The nested niri's instance, once the desktop runs.
+    nested_instance: Option<String>,
 }
 
 /// What the caller knows that `status` reports: the event stream's state (none in the
@@ -94,7 +122,8 @@ pub(crate) struct Sources<'a> {
     /// The engine serving the session; none for the `status` subcommand.
     pub(crate) engine: Option<EngineStatus>,
     pub(crate) event_stream: Option<StreamState>,
-    /// Whether niri's last config load failed, when niri has said.
+    /// Whether the last config load failed of the niri whose config `stop_key` reads, when
+    /// niri has said.
     pub(crate) config_failed: Option<bool>,
     /// What reads niri's config for `stop_key`; none to leave it unread. An action's
     /// checks don't need it, and a config file on a stuck filesystem would hold each of
@@ -110,6 +139,7 @@ pub(crate) struct Sources<'a> {
     pub(crate) confirm_lease: &'a Switch,
     pub(crate) tools: &'a Tools,
     pub(crate) shared: &'a Shared,
+    pub(crate) background: &'a Background,
     /// Where the session's own programs are found.
     pub(crate) place: Place<'a>,
     /// Where the session's desktop entries are.
@@ -234,26 +264,31 @@ pub(crate) async fn collect(env: &Env, sources: Sources<'_>) -> Status {
         confirm_lease,
         tools,
         shared,
+        background,
         place,
         apps,
         accessibility,
         accessibility_switch,
     } = sources;
     let socket = &env.niri_socket;
+    // The user's lock screen, Noctalia and stop key are the host's, also for a background
+    // desktop.
+    let host = env.host();
     let noctalia = async {
-        if env.desktop.noctalia.is_some() {
-            Some(noctalia::status(env).await)
+        if host.desktop.noctalia.is_some() {
+            Some(noctalia::status(host).await)
         } else {
             None
         }
     };
-    let (version, outputs, noctalia, logind, stop_key, desktop_entries) = tokio::join!(
+    let (version, outputs, noctalia, logind, stop_key, desktop_entries, report) = tokio::join!(
         niri::version(socket),
         niri::outputs(socket),
         noctalia,
-        control::logind(socket, &env.desktop),
-        stop_key_of(reader, socket, config_failed),
-        apps::listing(policy, apps, place)
+        control::logind(&host.niri_socket, &host.desktop),
+        stop_key_of(reader, &host.niri_socket, config_failed),
+        apps::listing(policy, apps, place),
+        background_of(env, background, reader.is_some())
     );
     let noctalia_status = noctalia.as_ref().and_then(|reply| reply.as_ref().ok());
     let lock = control::lock(logind, noctalia_status);
@@ -286,11 +321,44 @@ pub(crate) async fn collect(env: &Env, sources: Sources<'_>) -> Status {
         lease_notice_error,
         tools: tools.status(),
         shared: shared.status(),
+        background: report,
         binaries: SESSION_BINARIES
             .map(|name| (name, runner::finds(place, name)))
             .into_iter()
             .collect(),
         desktop_programs: env.desktop.clone(),
+    }
+}
+
+/// What `status` reports about background mode: the setting, then, with it on, the host's
+/// rules file, when `read_config` lets the report read the host niri's config as the stop
+/// key's check does, the private bus's `dbus-daemon` and, once the desktop runs, where it
+/// is. An action's checks don't read it, so they never wait on the host's config.
+async fn background_of(env: &Env, background: &Background, read_config: bool) -> BackgroundReport {
+    let config = background.status();
+    let started = env.background.as_deref();
+    let rules = if config.enabled && read_config {
+        let host = &env.host().niri_socket;
+        Some(match niri::pid(host).await {
+            Ok(pid) => rules::status(pid).await,
+            Err(error) => RulesStatus {
+                path: None,
+                config: None,
+                included: None,
+                error: Some(format!("find the host niri's process: {}", error.detail)),
+            },
+        })
+    } else {
+        None
+    };
+    let private = config.enabled && config.bus == Bus::Private;
+    BackgroundReport {
+        dbus_daemon: private.then(|| env.desktop.locate("dbus-daemon")).flatten(),
+        config,
+        rules,
+        workspace: started.map(|host| host.workspace.as_str().to_owned()),
+        host_instance: started.and_then(|host| host.env.instance()),
+        nested_instance: started.map(|host| host.nested_instance.clone()),
     }
 }
 
@@ -394,29 +462,41 @@ mod tests {
         assert_eq!(none["reason"], "niri has no enabled output");
     }
 
-    #[tokio::test]
-    async fn reports_what_it_can_without_failing() {
-        let audit = Audit::new(None);
-        let session = crate::test_support::session(1);
-        let settings = session.settings();
-        let sources = Sources {
+    /// What a report for a session with nothing set gets, `reader` reading niri's config.
+    fn sources<'a>(
+        audit: &'a Audit,
+        settings: &'a crate::session::Settings,
+        reader: Option<&'a stop_key::Reader>,
+        accessibility: &'a a11y::Presence,
+    ) -> Sources<'a> {
+        Sources {
             engine: None,
             event_stream: None,
             config_failed: None,
-            stop_key: Some(&stop_key::Reader::default()),
+            stop_key: reader,
             lease_notice_error: None,
-            audit: &audit,
+            audit,
             lease: status_without_desk(&Env::default()),
             policy: &settings.policy,
             unrestricted: &settings.unrestricted,
             confirm_lease: &settings.confirm_lease,
             tools: &settings.tools,
             shared: &settings.shared,
+            background: &settings.background,
             place: crate::test_support::no_programs(),
             apps: &settings.apps,
-            accessibility: &a11y::detect(None).await,
+            accessibility,
             accessibility_switch: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_what_it_can_without_failing() {
+        let audit = Audit::new(None);
+        let session = crate::test_support::session(1);
+        let reader = stop_key::Reader::default();
+        let accessibility = a11y::detect(None).await;
+        let sources = sources(&audit, session.settings(), Some(&reader), &accessibility);
         let status = serde_json::to_value(collect(&Env::default(), sources).await).unwrap();
         assert_eq!(
             status,
@@ -472,6 +552,11 @@ mod tests {
                 "lease_notice_error": null,
                 "tools": {"profile": "full", "source": null, "error": null},
                 "shared": {"setting": "on", "error": null},
+                "background": {
+                    "enabled": false, "bus": "private", "width": 1280, "height": 800,
+                    "source": null, "error": null, "rules": null, "dbus_daemon": null,
+                    "workspace": null, "host_instance": null, "nested_instance": null
+                },
                 "binaries": {"grim": false, "notify-send": false},
                 "desktop_programs": {"search": "", "loginctl": null, "noctalia": null}
             })
@@ -484,24 +569,10 @@ mod tests {
     async fn a_report_for_an_action_leaves_the_stop_key_unread() {
         let audit = Audit::new(None);
         let session = crate::test_support::session(1);
-        let settings = session.settings();
+        let accessibility = a11y::detect(None).await;
         let sources = Sources {
-            engine: None,
-            event_stream: None,
             config_failed: Some(false),
-            stop_key: None,
-            lease_notice_error: None,
-            audit: &audit,
-            lease: status_without_desk(&Env::default()),
-            policy: &settings.policy,
-            unrestricted: &settings.unrestricted,
-            confirm_lease: &settings.confirm_lease,
-            tools: &settings.tools,
-            shared: &settings.shared,
-            place: crate::test_support::no_programs(),
-            apps: &settings.apps,
-            accessibility: &a11y::detect(None).await,
-            accessibility_switch: None,
+            ..sources(&audit, session.settings(), None, &accessibility)
         };
         let status = collect(&Env::default(), sources).await;
         assert_eq!(status.stop_key, StopKey::Unknown);

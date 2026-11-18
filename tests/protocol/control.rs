@@ -109,6 +109,81 @@ async fn stop_refuses_a_stale_or_ambiguous_niri_socket() {
     assert!(!fixture.path("run/niri-computer-use").exists());
 }
 
+/// Registers a background desktop started from the fixture's niri instance `host`, as
+/// its start leaves it: a work directory naming the nested niri's socket `nested`, with
+/// its record there and in the nested instance's runtime directory, on the workspace
+/// `agent-shop`, with `niri` as the nested niri. Returns that runtime directory.
+pub(crate) fn background_desktop(
+    fixture: &Fixture,
+    host: &str,
+    nested: &str,
+    niri: &serde_json::Value,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let runtime = fixture.path("run/niri-computer-use");
+    let work = runtime.join(host).join("background/1-1");
+    let nested_dir = runtime.join(nested.strip_suffix(".sock").unwrap());
+    for dir in [&work, &nested_dir] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .unwrap();
+    }
+    let record = serde_json::json!({
+        "server": {"pid": 1, "start_time": 1, "boot_id": "boot"},
+        "work_dir": work,
+        "host_socket": fixture.path(&format!("run/{host}.sock")),
+        "rules": null,
+        "rule_written": false,
+        "workspace": "agent-shop",
+        "bus": "private",
+        "bus_address": "unix:path=/b",
+        "bus_daemon": null,
+        "niri": niri,
+        "nested_socket": fixture.path(&format!("run/{nested}")),
+        "nested_display": "wayland-9"
+    });
+    for dir in [&work, &nested_dir] {
+        std::fs::write(dir.join("background.json"), record.to_string()).unwrap();
+    }
+    std::fs::write(work.join("instance"), nested).unwrap();
+    nested_dir
+}
+
+/// The host's stop key and the plugin's Stop reach an agent in a background desktop:
+/// `stop` and `resume` set and clear its flag with the host's, and `resume` names the one
+/// whose input may be stuck, after clearing the others.
+#[tokio::test]
+async fn stop_and_resume_reach_the_background_desktops() {
+    let fixture = Fixture::new("stop-background");
+    let nested = background_desktop(
+        &fixture,
+        "niri.test",
+        "niri.wayland-9.1.sock",
+        &serde_json::Value::Null,
+    );
+    let host = fixture.path("run/niri-computer-use/niri.test");
+    let stop = run(&fixture, "stop").await;
+    assert!(stop.status.success(), "{stop:?}");
+    assert!(host.join("stop").exists());
+    assert!(nested.join("stop").exists());
+    std::fs::write(nested.join("input-dirty"), "").unwrap();
+    let resume = run(&fixture, "resume").await;
+    assert!(!resume.status.success());
+    let stderr = String::from_utf8(resume.stderr).unwrap();
+    assert!(
+        stderr.contains("the background desktop agent-shop stays stopped")
+            && stderr.contains("recover"),
+        "{stderr}"
+    );
+    assert!(!host.join("stop").exists());
+    assert!(nested.join("stop").exists());
+    std::fs::remove_file(nested.join("input-dirty")).unwrap();
+    assert!(run(&fixture, "resume").await.status.success());
+    assert!(!nested.join("stop").exists());
+}
+
 /// What `stop` says on stderr when it fails, as it must.
 async fn refused_stop(fixture: &Fixture) -> String {
     let stop = run(fixture, "stop").await;

@@ -92,7 +92,12 @@ pub(crate) struct RuntimeDir {
 impl RuntimeDir {
     /// The directory for the niri instance `env` resolved. Nothing is created.
     pub(crate) fn of(env: &Env) -> Result<Self, String> {
-        let socket = env.instance.socket().map_err(Clone::clone)?;
+        Self::for_socket(env.instance.socket().map_err(Clone::clone)?)
+    }
+
+    /// The directory for the niri instance whose resolved socket is `socket`. Nothing is
+    /// created.
+    pub(crate) fn for_socket(socket: &Path) -> Result<Self, String> {
         let (Some(dir), Some(name)) = (socket.parent(), socket.file_name()) else {
             return Err(format!("NIRI_SOCKET {} has no file name", socket.display()));
         };

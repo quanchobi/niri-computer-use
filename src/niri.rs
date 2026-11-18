@@ -2,6 +2,7 @@
 
 pub(crate) mod events;
 pub(crate) mod keyboard;
+pub(crate) mod listen;
 pub(crate) mod pointer;
 mod request;
 pub(crate) mod scene;
@@ -245,6 +246,15 @@ pub(crate) async fn act(
         return Err(Unanswered::Lost(unexpected("Action")));
     };
     Ok(())
+}
+
+/// Asks niri to carry out `action` for the server itself rather than an agent, as a
+/// background desktop's start and teardown do. An answer that was lost counts as a
+/// failure.
+pub(crate) async fn carry_out(socket: &Socket, action: Action) -> Result<(), ToolError> {
+    act(socket, action, || Ok(()))
+        .await
+        .map_err(|(Unanswered::Refused(error) | Unanswered::Lost(error))| error)
 }
 
 fn known(socket: &Socket) -> Result<&Path, ToolError> {

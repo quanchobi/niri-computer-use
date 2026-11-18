@@ -129,7 +129,7 @@ pub(crate) struct Desktop {
     state: DesktopState,
     /// By name.
     outputs: Vec<OutputSummary>,
-    /// Only when Noctalia is installed.
+    /// Only when Noctalia serves this desktop, so never for a background desktop.
     #[serde(skip_serializing_if = "Option::is_none")]
     shell: Option<Shell>,
     /// Why every window's `title` is null: the screen is locked, and the lock screen hides
@@ -332,9 +332,10 @@ impl Engine {
         &self.audit
     }
 
-    /// Found once at startup, because the tool list depends on it.
+    /// Whether Noctalia serves this engine's desktop, found once at startup, because the
+    /// tool list depends on it. A background desktop has none: Noctalia is the host's shell.
     pub(crate) const fn noctalia_installed(&self) -> bool {
-        self.env.desktop.noctalia.is_some()
+        self.env.desktop.noctalia.is_some() && self.env.background.is_none()
     }
 
     pub(crate) const fn has_a11y(&self) -> bool {
@@ -416,7 +417,11 @@ impl Engine {
         let sources = status::Sources {
             engine: Some(engine),
             event_stream: Some(event_stream),
-            config_failed: self.config_failed(),
+            config_failed: if read_stop_key {
+                self.stop_key_config_failed().await
+            } else {
+                None
+            },
             stop_key: read_stop_key.then_some(&self.stop_key),
             lease_notice_error: self.notices.last_error(),
             audit: &self.audit,
@@ -426,6 +431,7 @@ impl Engine {
             confirm_lease: &settings.confirm_lease,
             tools: &settings.tools,
             shared: &settings.shared,
+            background: &settings.background,
             place: settings.place(),
             apps: &settings.apps,
             accessibility: &self.accessibility,
@@ -454,7 +460,10 @@ impl Engine {
         }
         let stop_key = self
             .stop_key
-            .check(&self.env.niri_socket, self.config_failed())
+            .check(
+                &self.env.host().niri_socket,
+                self.stop_key_config_failed().await,
+            )
             .await;
         Ok(Granted {
             holder,
@@ -466,7 +475,9 @@ impl Engine {
 
     /// Puts the notification `notify_on_lease` asks for on the desktop, unless the user
     /// has just allowed the lease (`confirm_lease`), this agent was notified about within
-    /// `notice::INTERVAL`, or the Noctalia plugin, which sends its own, is enabled.
+    /// `notice::INTERVAL`, or the Noctalia plugin, which sends its own, is enabled. The
+    /// plugin announces no background desktop's lease, so a background desktop always
+    /// sends its own.
     async fn announce(&self, session: &Session, label: &Label) {
         let settings = session.settings();
         if !settings.policy.notify_on_lease() || settings.confirm_lease.enabled() {
@@ -475,7 +486,7 @@ impl Engine {
         if !self.notices.due(label, Instant::now()) {
             return;
         }
-        if self.env.desktop.noctalia.is_some() && noctalia::plugin_enabled(&self.env).await {
+        if self.noctalia_installed() && noctalia::plugin_enabled(&self.env).await {
             return;
         }
         let project = watch::project_of(std::path::Path::new("/proc"), label.pid());
@@ -490,6 +501,16 @@ impl Engine {
             .as_ref()
             .ok()
             .and_then(EventStream::config_failed)
+    }
+
+    /// Whether the last config load failed of the niri whose config binds the stop key: the
+    /// host's, asked afresh, for a background desktop, whose stop key is the host's and
+    /// whose event stream is the nested niri's; else as the event stream last said.
+    async fn stop_key_config_failed(&self) -> Option<bool> {
+        match &self.env.background {
+            Some(link) => niri::config_failed(&link.env.niri_socket).await.ok(),
+            None => self.config_failed(),
+        }
     }
 
     /// Why `session`'s client `label` may not take the lease: the readiness report's
@@ -721,12 +742,14 @@ impl Engine {
         })
     }
 
-    /// One snapshot of the event stream, with niri's outputs and, when Noctalia is
-    /// installed, its status or why it has none.
+    /// One snapshot of the event stream, with niri's outputs and, when Noctalia serves this
+    /// desktop, its status or why it has none. The lock state that hides titles is the
+    /// host's, read from the host's Noctalia and logind for a background desktop.
     pub(crate) async fn desktop(&self) -> Result<Desktop, ToolError> {
+        let host = self.env.host();
         let shell = async {
-            if self.noctalia_installed() {
-                Some(noctalia::status(&self.env).await)
+            if host.desktop.noctalia.is_some() {
+                Some(noctalia::status(host).await)
             } else {
                 None
             }
@@ -735,10 +758,11 @@ impl Engine {
             niri::desktop(self.events.as_ref()),
             niri::outputs(&self.env.niri_socket),
             shell,
-            control::logind(&self.env.niri_socket, &self.env.desktop)
+            control::logind(&host.niri_socket, &host.desktop)
         );
         let noctalia = shell.as_ref().and_then(|status| status.as_ref().ok());
         let lock = control::lock(logind, noctalia);
+        let shell = shell.filter(|_| self.noctalia_installed());
         let mut state = state?;
         let titles_hidden = policy::refuse_observe(lock.state()).map(|refused| refused.detail);
         if titles_hidden.is_some() {
@@ -1572,6 +1596,68 @@ mod tests {
         }
     }
 
+    /// Serves an empty desktop on `socket` as niri would: its event stream, kept open, and
+    /// no outputs.
+    fn empty_niri(socket: &std::path::Path) {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        tokio::spawn(async move {
+            while let Ok((connection, _)) = listener.accept().await {
+                tokio::spawn(answer_empty(connection));
+            }
+        });
+    }
+
+    /// Answers one request as niri on an empty desktop does, and keeps the connection.
+    async fn answer_empty(connection: tokio::net::UnixStream) {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+        let mut connection = tokio::io::BufReader::new(connection);
+        let mut request = String::new();
+        connection.read_line(&mut request).await.ok();
+        let reply = if request.contains("EventStream") {
+            EMPTY_DESKTOP
+        } else {
+            "{\"Ok\":{\"Outputs\":{}}}\n"
+        };
+        connection.get_mut().write_all(reply.as_bytes()).await.ok();
+        std::future::pending::<()>().await;
+    }
+
+    #[tokio::test]
+    async fn a_background_desktop_shows_no_shell_and_hides_titles_while_the_host_is_locked() {
+        let dir = crate::test_support::fresh_dir("engine-background");
+        let host = Env {
+            runtime_dir: Some(dir.clone()),
+            wayland_display: Some("wayland-1".into()),
+            desktop: runner::Desktop {
+                noctalia: Some("/usr/bin/noctalia".into()),
+                ..runner::Desktop::default()
+            },
+            ..Env::default()
+        };
+        crate::test_support::locked_noctalia(&host);
+        let socket = dir.join("nested.sock");
+        empty_niri(&socket);
+        let nested = Env {
+            niri_socket: niri::Socket::at(socket.clone()),
+            wayland_display: Some("wayland-2".into()),
+            desktop: host.desktop.clone(),
+            background: Some(Arc::new(crate::background::Host {
+                env: host,
+                workspace: crate::background::plan::workspace_name(Some("shop"), 7, &[]),
+                nested_instance: "nested.sock".to_owned(),
+            })),
+            ..Env::default()
+        };
+        let engine = without_a11y(nested, Ok(EventStream::spawn(socket)));
+        assert!(!engine.noctalia_installed());
+        until(|| engine.connection() == Some(1)).await;
+        let desktop = serde_json::to_value(engine.desktop().await.unwrap()).unwrap();
+        assert!(desktop.get("shell").is_none(), "{desktop}");
+        assert!(desktop["titles_hidden"].is_string(), "{desktop}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Polls `call` as far as its first wait, which must not be its end. A call waiting for
     /// the action mutex is queued there by then, behind the calls polled before it.
     async fn queue(call: &mut (impl Future + Unpin)) {
@@ -1695,6 +1781,7 @@ mod tests {
             confirm_lease: confirm.then(|| "1".into()),
             tools: None,
             shared: None,
+            background: None,
             home: None,
             path: Some(bin.as_os_str().to_owned()),
             apps: crate::apps::Search::default(),

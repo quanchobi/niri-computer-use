@@ -7,13 +7,19 @@ compatibility: Needs the niri-computer-use MCP server (niri-computer-use serve) 
 
 # Operating the niri desktop
 
-The `niri-computer-use` MCP server shows you the user's real desktop and, while you hold its lease, lets you act on it. Everything you do happens on the screen the user is working on, and they can take the desktop back at any moment with a stop key. The server's checks are guardrails, not a sandbox: a click or a key can do anything the user could do.
+The `niri-computer-use` MCP server shows you the user's real desktop and, while you hold its lease, lets you act on it. Everything you do happens on the screen the user is working on, unless the user gave you a background desktop (below), and they can take the desktop back at any moment with a stop key. The server's checks are guardrails, not a sandbox: a click or a key can do anything the user could do.
 
 This skill uses short tool names, but your client adds its MCP prefix: call the names it lists, such as `mcp__niri-computer-use__status` in Claude Code, since a bare `status` fails. In a client that defers tool schemas, such as Claude Code, load the schemas of the tools you will use with one `ToolSearch select:` before the first call; guessed argument names fail. Use these tools for everything on the desktop. Running `grim`, `niri msg`, `wl-paste`, `noctalia msg` or an input program yourself, or starting apps from a shell, skips the lease, the stop key and the audit log the user relies on.
 
+## In a background desktop
+
+When `status.background.enabled` is true, you work in a background desktop: a nested niri of your own, which the user sees as one window on a workspace of their desktop, named in `status.background.workspace`. Your screenshots, `desktop_state` and input reach only it; the user's windows aren't there, and your focus changes and keys never reach theirs. The user chose this mode, and no tool changes it: don't look for their windows, and don't ask to leave it. Your first tool call starts the desktop, so it takes a moment longer, and the tool list can change after it. `shell_panel` and `noctalia` aren't listed there. The lease, `acquire_desktop` and `release_desktop` work as below, on that desktop alone; the user's screen lock and stop key still stop you.
+
+The desktop starts empty, and apps start there only through `launch`, from a preset or a desktop entry (or `niri_action`'s `Spawn` with `unrestricted`). With `status.background.bus` `private`, those apps have no keyring, saved logins or portals, and a flatpak app's file dialog cancels: don't open one. Open a file with a preset whose command names it, when the user has one; otherwise tell the user what the task needs. With `host`, they share the user's session bus, so a single-instance app, such as a browser already open on the user's desktop, can hand its new window to the copy there, out of your sight: prefer apps that run a separate instance, and when `launch` reports no window, tell the user rather than launch again.
+
 ## Looking
 
-Start with `status`: it says whether the screen is locked, whether Noctalia runs, which apps `launch` can start and who holds the lease. Then prefer structured data, exact and cheap, to screenshots:
+Start with `status`: it says whether the screen is locked, whether Noctalia runs, which apps `launch` can start, who holds the lease and whether you work in a background desktop. Then prefer structured data, exact and cheap, to screenshots:
 
 - `desktop_state` for windows (ids, `app_id`, title), workspaces, the focused window, monitors (`outputs`) and Noctalia's panels (`shell`)
 - `elements` for what is in one window, when the app exposes accessibility: buttons, fields and menu items with their names, states and places on the screen
@@ -76,7 +82,7 @@ A window can open in the middle of your work, a dialog or a notification that ta
 
 ## When to stop and hand back
 
-Stop and tell the user, quoting the error's `detail`, when a tool returns `stopped`, `recovery_required`, `screen_locked`, `lease_held`, `lease_declined`, `read_only`, `app_denied`, `untested_output_config` or `refused`. These are the user's decisions: `resume` and `recover` are their commands, and only they can unlock the screen or free the lease. Don't call the refused action again or work around it. One exception: when a `recovery_required` detail says input is still finishing, or may still be finishing, wait a few seconds and try once more; if it refuses again, stop and hand back. `lock_stale` isn't the user's decision: the desktop answered slowly and nothing was sent, so try once more, and stop and tell the user if it comes back again.
+Stop and tell the user, quoting the error's `detail`, when a tool returns `stopped`, `recovery_required`, `screen_locked`, `lease_held`, `lease_declined`, `read_only`, `app_denied`, `untested_output_config`, `refused` or `background_unavailable`. These are the user's decisions: `resume` and `recover` are their commands, and only they can unlock the screen, free the lease or fix the background desktop's setup. Don't call the refused action again or work around it. One exception: when a `recovery_required` detail says input is still finishing, or may still be finishing, wait a few seconds and try once more; if it refuses again, stop and hand back. `lock_stale` isn't the user's decision: the desktop answered slowly and nothing was sent, so try once more, and stop and tell the user if it comes back again.
 
 `unrestricted_required` means the action, such as niri's `Spawn`, needs `unrestricted = true` in the user's policy file. Tell the user that, and don't reach the same result another way: no keys, presets or shell commands in its place.
 

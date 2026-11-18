@@ -10,7 +10,9 @@
 //! - niri's socket is `niri.<display>.<pid>.sock` in niri's runtime directory
 //!   (`IpcServer::start` in niri v26.04 `src/ipc/server.rs`), and it counts only while
 //!   process `<pid>` is a running niri that accepts a connection on it, or, for `stop` and
-//!   `resume`, only while `<pid>` is a running niri (see [`Probe`]);
+//!   `resume`, only while `<pid>` is a running niri (see [`Probe`]). Without a given
+//!   `WAYLAND_DISPLAY`, a background desktop's nested niri doesn't count: its instance's
+//!   runtime directory holds a record naming that niri (see [`background()`]);
 //! - the Wayland display is that `<display>`, a socket in the runtime directory.
 //!
 //! Parsing a socket's name and choosing among the sockets are pure. The reads take their
@@ -24,8 +26,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::background::record::Record;
 use crate::control::procs;
-use crate::control::runtime::Instance;
+use crate::control::runtime::{Instance, RuntimeDir};
 use crate::niri;
 
 /// Where a session variable's value came from.
@@ -254,8 +257,36 @@ async fn niri_socket(
     let dir =
         dir.ok_or("NIRI_SOCKET is not set and there is no runtime directory to look for it in")?;
     let mut found = niri_sockets(dir, roots, probe).await?;
-    found.retain(|socket| display.is_none_or(|display| serves(socket, display, dir)));
+    found.retain(|socket| {
+        display.map_or_else(
+            || !background(socket, roots.proc),
+            |display| serves(socket, display, dir),
+        )
+    });
     choose(dir, &found, display)
+}
+
+/// Whether `socket` is a background desktop's nested niri: its instance's runtime
+/// directory has the desktop's record, which names the niri listening there by PID, start
+/// time and boot. A nested niri shares the host's runtime directory, so without this, a
+/// client that passes neither `NIRI_SOCKET` nor `WAYLAND_DISPLAY` would find two niri
+/// instances while an agent works in the background. Only the record's own niri is
+/// skipped: a record left behind names a process that no longer runs.
+fn background(socket: &Path, proc_root: &Path) -> bool {
+    let Some((_, pid)) = socket
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(parse_socket_name)
+    else {
+        return false;
+    };
+    let record = std::fs::canonicalize(socket)
+        .ok()
+        .and_then(|resolved| RuntimeDir::for_socket(&resolved).ok())
+        .and_then(|runtime| Record::read(runtime.path()).ok().flatten());
+    record
+        .and_then(|record| record.niri)
+        .is_some_and(|niri| niri.pid == pid && niri.alive(proc_root))
 }
 
 /// The sockets in `dir` named the way niri names its own, owned by `roots.euid`, whose
@@ -557,6 +588,54 @@ mod tests {
                 warning: None,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn skips_a_background_desktops_nested_niri_unless_its_display_is_given() {
+        use crate::background::record::{Ident, Record};
+
+        let mut host = Host::new("discover-background");
+        let live = host.niri("wayland-1");
+        let nested = host.niri("wayland-2");
+        for display in ["wayland-1", "wayland-2"] {
+            host.socket(display);
+        }
+        let ambiguous = host.session(Given::default()).await;
+        assert!(
+            missing(&ambiguous.sources.niri_socket).contains("2 running niri instances"),
+            "{:?}",
+            ambiguous.sources
+        );
+        let random = host.proc().join("sys/kernel/random");
+        std::fs::create_dir_all(&random).unwrap();
+        std::fs::write(random.join("boot_id"), "boot-1\n").unwrap();
+        let runtime = std::fs::canonicalize(host.runtime()).unwrap();
+        let live_dir = RuntimeDir::for_socket(&runtime.join(&live)).unwrap();
+        let mut record = Record::running(&live_dir, "1-1", &runtime.join(&nested), "shop");
+        let nested_dir = RuntimeDir::for_socket(&runtime.join(&nested)).unwrap();
+        let niri = Ident::of(&host.proc(), std::process::id()).unwrap();
+        let named = |written: &mut Record, by: Ident| {
+            written.niri = Some(by);
+            written.write(nested_dir.path()).unwrap();
+        };
+        named(&mut record, niri.clone());
+        let session = host.session(Given::default()).await;
+        assert_eq!(session.niri_socket, Ok(host.runtime().join(&live)));
+        assert_eq!(session.wayland_display, Some("wayland-1".into()));
+        let given = Given {
+            wayland_display: Some("wayland-2".into()),
+            ..Given::default()
+        };
+        let inside = host.session(given).await;
+        assert_eq!(inside.niri_socket, Ok(host.runtime().join(&nested)));
+        // A record whose niri has ended names another process than this socket's.
+        let ended = Ident {
+            start_time: niri.start_time + 1,
+            ..niri
+        };
+        named(&mut record, ended);
+        let left = host.session(Given::default()).await;
+        assert!(missing(&left.sources.niri_socket).contains("2 running niri instances"));
     }
 
     #[tokio::test]

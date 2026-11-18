@@ -55,6 +55,10 @@ These are the user's decisions. Don't call the refused action again and don't tr
 
 `engine_lost` means the shared engine serving this session ended. What a call in flight did is unknown, and the lease is gone: look at `desktop_state` or a screenshot before acting again, and call `acquire_desktop` again if you still need it. `engine_unavailable` means no shared engine could be reached for this call; the next call tries again. When its `detail` says to restart an MCP client or to point clients at one file, an engine of another build runs, as after an upgrade or beside a second install: no retry gets past it, so tell the user what the `detail` says to do. When its `detail` says to restart the MCP server, the user requires the shared engine and none could be used when the server started: no call will work, so stop and tell the user the `detail`. Tell the user too if it keeps happening.
 
+## Background desktop
+
+`background_unavailable` means the user set this server to drive a background desktop and it can't: the setting is wrong, it conflicts with `shared = "required"`, or the desktop didn't start, for example because the user's niri config doesn't include the rules file. The server never falls back to the user's desktop, so neither do you: stop and tell the user the `detail`, which says what to fix. When it says the next call tries again, call once more only after the user says it is fixed.
+
 ## Not an error
 
 `focused_window` is null while keyboard focus is outside the window layout, for example on a shell panel, the lock screen or the overview.

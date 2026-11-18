@@ -93,6 +93,43 @@ The clipboard couldn't be saved whole: it held over 16 MiB, its owner didn't ans
 
 If something removes the runtime directory, `niri-computer-use/<instance>/` beside niri's socket with every symlink resolved, while a server runs, the server gives up the lease and refuses it until it restarts, and an action in progress fails with `upstream_error`. Restart the agent's session. A shared engine exits instead, within about a second: a call in flight fails with `engine_lost`, or, with none in flight, the session's next call does, and the call after that reaches a new engine.
 
+## Every call fails with `background_unavailable`
+
+The server is set to drive a [background desktop](../../concepts/configuration/#background) and can't, and the `detail` says why. `status --check` with the client's setting shows the cause and its fix:
+
+```sh
+NIRI_COMPUTER_USE_BACKGROUND=private niri-computer-use status --check
+```
+
+A variable value other than `private`, `host` or `off`, an invalid policy file that asks for a background desktop, or `shared = "required"` beside it shows on the `background desktop` line:
+
+```text
+✗ background desktop: NIRI_COMPUTER_USE_BACKGROUND is "on"; it takes private, host or off, and a wrong value never falls back to the live desktop, so every call fails with background_unavailable
+```
+
+Fix it in the client's server settings or the policy file, then restart the MCP server.
+
+A niri config that doesn't include the rules file shows on the `background rules file` line, and every start fails:
+
+```text
+✗ background rules file: … doesn't include …/niri-computer-use.kdl, so no background desktop can start
+```
+
+Create `niri-computer-use.kdl` beside the config the line names, if it isn't there, then add `include "niri-computer-use.kdl"` at the end of that config. In that order: niri 26.04 refuses a whole config that includes a missing file, and `niri validate` says so:
+
+```text
+Error:   × failed to read included config from "/home/you/.config/niri/niri-computer-use.kdl":
+  │ No such file or directory (os error 2)
+```
+
+With the private bus, a missing `dbus-daemon` shows on its own line, and each call says `the background desktop didn't start: no dbus-daemon in …; the next call tries again`:
+
+```text
+✗ dbus-daemon: not found in …, so the background desktop's private bus can't start
+```
+
+The server looks for it where it looks for `loginctl`. Install it (the `dbus` package), and the next call tries again, without a restart. When it is installed elsewhere, set [`NIRI_COMPUTER_USE_DESKTOP_PATH`](../../concepts/configuration/#environment) to its directory, or use the host bus, `bus = "host"` in the policy file or `NIRI_COMPUTER_USE_BACKGROUND=host`, and restart the MCP server.
+
 ## Shared mode serves the client standalone
 
 With [`shared`](../../concepts/configuration/#shared) on, the default, `status.engine.mode` says `standalone` and `engine.fallback` says why; the server's stderr has the same line. If the engine runs another build, you reinstalled while it ran. An engine newer than 0.1.5 hands over to the first client of the new build that connects while no agent holds the desktop. One that refused this client was held, and the fallback says so: it hands over once that agent gives the desktop up. An engine of 0.1.5 or older keeps serving until its clients have ended. Either way, the fallback names the old engine's PID and says to restart the clients it serves, and those clients see `engine.replaced: true`; restarting them ends the wait. If neither build was replaced, as with one install by `cargo install` and another by the install script, the fallback names both files instead: point every MCP client at one of them, since restarting a client runs its own build again. If the engine's socket path is too long, niri's socket directory is: the socket is `niri-computer-use/<instance>/engine.sock` in the directory holding niri's socket, with every symlink resolved, where `<instance>` is niri's socket name without `.sock`, and it must fit in 108 bytes. `/run/user/<uid>` fits; a long test or container directory may not. If no engine answered, read `engine.log` next to that socket.

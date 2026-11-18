@@ -22,7 +22,7 @@ The server reads `~/.config/niri-computer-use/policy.toml`, or `$XDG_CONFIG_HOME
 | `capture_dir_source` | `policy` when the file sets `capture_dir`, `""` included, `default` when it doesn't or there is no file, null while the file is invalid |
 | `error` | why the file is invalid |
 
-`status.desktop_entries` lists the [desktop entries](#launch_desktop_entries) `launch` would start, and is null while `launch_desktop_entries` is off. `status` also shows `unrestricted` and `confirm_lease`, each with `enabled`, `source` (`policy`, `env`, `both`, or null while off) and `error`, which explains a `NIRI_COMPUTER_USE_UNRESTRICTED` or `NIRI_COMPUTER_USE_CONFIRM_LEASE` value other than `1`. Its `tools` shows the [tool profile](#tools): `profile`, `source` (`policy`, `env`, `both`, or null for `full`) and `error`, which explains a `NIRI_COMPUTER_USE_TOOLS` value that names no profile.
+`status.desktop_entries` lists the [desktop entries](#launch_desktop_entries) `launch` would start, and is null while `launch_desktop_entries` is off. `status` also shows `unrestricted` and `confirm_lease`, each with `enabled`, `source` (`policy`, `env`, `both`, or null while off) and `error`, which explains a `NIRI_COMPUTER_USE_UNRESTRICTED` or `NIRI_COMPUTER_USE_CONFIRM_LEASE` value other than `1`. Its `tools` shows the [tool profile](#tools): `profile`, `source` (`policy`, `env`, `both`, or null for `full`) and `error`, which explains a `NIRI_COMPUTER_USE_TOOLS` value that names no profile. Its `background` shows the [background desktop](#background) setting.
 
 An invalid file doesn't stop the server, but `acquire_desktop` and every action refuse with `read_only` until you fix it and restart. A file with an unknown key is invalid too.
 
@@ -179,6 +179,48 @@ An entry is refused with `app_denied` when [`deny_input_app_ids`](#deny_input_ap
 
 This sits between presets and [`unrestricted`](#unrestricted). The agent can start only apps installed for the whole system, each with the command its entry fixes, but it can start any of them, a terminal without arguments included, as a preset may. A program running as you can't add an entry, since entries you can write are refused.
 
+### `[background]`
+
+A table, absent by default. With it, `serve` drives a background desktop of its own instead of your desktop: a nested niri, shown as one floating window on a workspace of its own on your niri. The agent looks at and acts on the nested niri only, so your focus, keyboard, pointer and layout aren't touched, and your windows aren't in its screenshots. Without the table or `NIRI_COMPUTER_USE_BACKGROUND`, nothing changes. [First session](../../start/first-session/#work-in-a-background-desktop) has the setup, and [Safety](../safety/#background-desktops) says what it keeps apart and what it doesn't.
+
+| Key | Value |
+|---|---|
+| `bus` | `"private"`, the default: a `dbus-daemon` of the desktop's own, so the apps the agent starts there don't reach your apps, portals or keyring over D-Bus. `"host"`: your session bus, so they get your keyring and saved logins |
+| `width`, `height` | the nested window's size in your niri's logical pixels, a whole number from 1 to 65535; default 1280 and 800 |
+
+An empty table turns it on with the defaults. Any other key, or a value out of range, makes the file invalid.
+
+```toml
+[background]
+bus = "host"
+width = 1600
+height = 900
+```
+
+With this file, `status.background` reports:
+
+```json
+{"enabled":true,"bus":"host","width":1600,"height":900,"source":"policy","error":null,"rules":{"path":"/home/you/.config/niri/niri-computer-use.kdl","config":"/home/you/.config/niri/config.kdl","included":true,"error":null},"dbus_daemon":null,"workspace":null,"host_instance":null,"nested_instance":null}
+```
+
+`NIRI_COMPUTER_USE_BACKGROUND` in the server's environment, `private`, `host` or `off`, overrides the file for that one client: it decides whether the server drives a background desktop and which bus it gets, while `width` and `height` still come from the file, or the defaults without one. Unset or empty leaves the file to decide. `status.background.source` says what turned it on, `policy`, `env` or `both`, and is null while it is off. Only you choose: no tool lets an agent start, stop or leave a background desktop.
+
+The server never falls back to your desktop. When the variable has any other value, when the policy file is invalid and asks for a background desktop, or when background mode meets [`shared = "required"`](#shared) or `NIRI_COMPUTER_USE_SHARED=required`, the server lists its tools and every call fails with [`background_unavailable`](../../reference/errors/#background_unavailable), whose `detail` says why, until you fix the setting and restart the MCP server. `status.background.error` and `status --check` say the same. An invalid file asks for one when it is TOML with a top-level `background`, or, when it isn't TOML at all, has a `[background]` or `[background.…]` header, or a `background` key before its first table header. `off` still turns it off: that client then drives your desktop, where an invalid file refuses every action with `read_only` as usual.
+
+Background mode ignores `shared = true` and `false`: each server runs its background desktop's engine in its own process, for its one client. That is why `"required"` conflicts with it.
+
+The desktop starts on the client's first tool call, not when the server starts, since clients start every registered server whenever an agent session begins. Until then the server answers `tools/list` itself, and once the desktop runs it sends `notifications/tools/list_changed`. In testing, the start added 0.6 s to the first call. A start that fails fails that call with `background_unavailable` and the reason, such as a missing include or `dbus-daemon`, and the next call tries again. The desktop is torn down when the client ends, or on `SIGTERM`, `SIGHUP` or `SIGINT`. When the server is killed, its crash guardian tears it down, or failing that, the next background desktop's start does.
+
+Each start:
+
+- takes the focused output's last workspace, the empty one niri always keeps there, so your workspaces keep their indices, and names it `agent-<project>`. `<project>` is the last part of the agent's working directory, cut to 32 characters, with any character other than `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-` as `-`. Without one the name is `agent-<server PID>`, and while a workspace has the name, `-2`, `-3` and so on are added. Switch to that workspace to watch the agent.
+- writes a window rule into `niri-computer-use.kdl` beside the config your niri loaded, so the nested niri's window opens on that workspace, floating, unfocused, `width` by `height`, and puts the file back to a comment once the window is open. Your config must include the file, last (see [First session](../../start/first-session/#work-in-a-background-desktop)). The server creates the file when it is missing and never removes it, and it never edits your config.
+- starts the nested niri, the same program as yours, then, with the private bus, its `dbus-daemon`, found in the same directories as `loginctl` (see [`NIRI_COMPUTER_USE_DESKTOP_PATH`](#environment)). The private bus starts only three services: flatpak's portal and session helper, which `flatpak-spawn --sandbox` and `flatpak run` need, and the accessibility bus's launcher, so `elements` works there.
+
+The background desktop is a niri instance of its own, with its own lease, stop flag and input-dirty marker, so an agent there neither holds nor waits for your desktop's lease. Its lock state is your desktop's, and `stop`, `resume`, the stop key and the Noctalia plugin's Stop reach it too. `launch` starts apps inside it, from presets and desktop entries as on your desktop, and they get its bus. `shell_panel` and `noctalia` aren't listed there, since Noctalia is your desktop's shell, and `desktop_state` has no `shell`.
+
+`status.background` has `enabled`, `bus`, `width`, `height`, `source` and `error` as above; `rules`, with the rules file's `path`, the `config` your niri loaded, whether it is `included` and why that can't be read (`error`), null while background mode is off; `dbus_daemon`, the path found for the private bus; and, once the desktop runs, `workspace`, `host_instance` and `nested_instance`. See [`status`](../../tools/looking/#status).
+
 ### `[[preset]]`
 
 One table per app `launch` may start. `name`, `argv` and `app_id` are required:
@@ -225,5 +267,6 @@ The server reads these once, at startup. When `XDG_RUNTIME_DIR`, `NIRI_SOCKET` o
 | `NIRI_COMPUTER_USE_CONFIRM_LEASE` | `1` turns on [`confirm_lease`](#confirm_lease) for this server; unset or empty leaves the policy file to decide |
 | `NIRI_COMPUTER_USE_TOOLS` | `observe`, `act` or `full`: the [tool profile](#tools) for this server; unset or empty leaves the policy file to decide |
 | `NIRI_COMPUTER_USE_SHARED` | `1` turns on [`shared`](#shared) mode for this server, `0` turns it off and `required` requires the shared engine; unset or empty leaves the policy file to decide |
+| `NIRI_COMPUTER_USE_BACKGROUND` | `private` or `host` turns on a [background desktop](#background) for this server, with that bus, and `off` turns it off; unset or empty leaves the policy file to decide. Any other value fails every call with `background_unavailable` |
 
 The lock state comes from logind's session for niri's own process, which the server finds through niri's socket, so the server's own `XDG_SESSION_ID` doesn't matter.

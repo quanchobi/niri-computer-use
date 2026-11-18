@@ -49,7 +49,7 @@ const policy = read('../../src/policy.rs');
 const config = read('../src/content/docs/concepts/configuration.md');
 const keysSection = config.slice(config.indexOf('\n## Keys'), config.indexOf('\n## ', config.indexOf('\n## Keys') + 1));
 const topKeys = new Set(
-	[...keysSection.matchAll(/^### `(?:\[\[)?([a-z_]+)(?:\]\])?`$/gm)].map((m) => m[1]),
+	[...keysSection.matchAll(/^### `(?:\[\[?)?([a-z_]+)(?:\]\]?)?`$/gm)].map((m) => m[1]),
 );
 compare('policy keys', fields(block(policy, 'struct', 'Policy')), topKeys);
 const presetSection = keysSection.slice(keysSection.indexOf('### `[[preset]]`'));

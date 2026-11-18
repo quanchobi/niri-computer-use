@@ -46,7 +46,31 @@ struct View {
     lease_notice_error: Option<String>,
     tools: SettingView,
     shared: SettingView,
+    background: BackgroundView,
     binaries: BTreeMap<String, bool>,
+    desktop_programs: DesktopProgramsView,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackgroundView {
+    enabled: bool,
+    bus: String,
+    error: Option<String>,
+    rules: Option<RulesView>,
+    dbus_daemon: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RulesView {
+    path: Option<String>,
+    config: Option<String>,
+    included: Option<bool>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DesktopProgramsView {
+    search: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +171,7 @@ fn lines(view: &View, program: &Path) -> Vec<Line> {
     if reachable {
         lines.push(stop_key(view, program));
     }
+    lines.extend(background(view, reachable));
     lines.extend(flags(view));
     lines.push(policy(&view.policy));
     lines.extend(notice(view));
@@ -335,6 +360,80 @@ fn notice(view: &View) -> Option<Line> {
     ))
 }
 
+/// Background mode's prerequisites, while it is on: a setting that can be used, the host
+/// config's include of the rules file, unless niri is out of reach, and `dbus-daemon` for
+/// the private bus. Each blocks every call, which fails with `background_unavailable`.
+fn background(view: &View, reachable: bool) -> Vec<Line> {
+    let background = &view.background;
+    if !background.enabled {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    if let Some(error) = &background.error {
+        lines.push(Line::blocker(
+            format!("background desktop: {error}, so every call fails with background_unavailable"),
+            "correct the policy file's [background] table or NIRI_COMPUTER_USE_BACKGROUND in the agent's server settings, then restart your agents",
+        ));
+    }
+    if let (true, Some(rules)) = (reachable, &background.rules) {
+        lines.push(rules_line(rules));
+    }
+    if background.bus == "private" {
+        lines.push(dbus_daemon(
+            background.dbus_daemon.as_deref(),
+            &view.desktop_programs.search,
+        ));
+    }
+    lines
+}
+
+/// Whether the private bus's `dbus-daemon` was found in the desktop's `search` path.
+fn dbus_daemon(found: Option<&str>, search: &str) -> Line {
+    found.map_or_else(
+        || {
+            Line::blocker(
+                format!(
+                    "dbus-daemon: not found in {search}, so the background desktop's private bus can't start"
+                ),
+                "install dbus-daemon (the dbus package), or choose the host bus: NIRI_COMPUTER_USE_BACKGROUND=host where the agent's server settings set the variable, otherwise bus = \"host\" in the policy file's [background] table",
+            )
+        },
+        |path| Line::met(format!("dbus-daemon: {path}, for the private bus")),
+    )
+}
+
+/// Whether the host niri's config includes the rules file a background desktop's start
+/// writes its window rule to.
+fn rules_line(rules: &RulesView) -> Line {
+    let unknown = || "?".to_owned();
+    let path = rules.path.clone().unwrap_or_else(unknown);
+    let config = rules.config.clone().unwrap_or_else(unknown);
+    match rules.included {
+        Some(true) => Line::met(format!(
+            "background rules file: {path}, included by {config}"
+        )),
+        Some(false) => Line::blocker(
+            format!(
+                "background rules file: {config} doesn't include {path}, so no background desktop can start"
+            ),
+            format!(
+                "create {path} if it isn't there (niri 26.04 refuses a whole config that includes a missing file; the server keeps it, with only a comment), then add this line at the end of {config}, so the rule a start writes comes after your own rules:\n{}",
+                crate::background::plan::INCLUDE_LINE
+            ),
+        ),
+        None => Line::blocker(
+            format!(
+                "background rules file: can't tell whether the host niri's config includes it ({}), so a background desktop's start may fail",
+                rules.error.as_deref().unwrap_or("no reason given")
+            ),
+            format!(
+                "make sure the host niri's config ends with {}",
+                crate::background::plan::INCLUDE_LINE
+            ),
+        ),
+    }
+}
+
 /// The variables refused. The shared engine isn't checked: it runs only while clients
 /// are connected, so from the `status` subcommand there is usually none to ask.
 fn settings(view: &View) -> Vec<Line> {
@@ -421,7 +520,12 @@ mod tests {
             "lease_notice_error": null,
             "tools": {"profile": "full", "source": null, "error": null},
             "shared": {"setting": "on", "error": null},
-            "binaries": {"grim": true, "notify-send": true}
+            "background": {
+                "enabled": false, "bus": "private", "error": null, "rules": null,
+                "dbus_daemon": null
+            },
+            "binaries": {"grim": true, "notify-send": true},
+            "desktop_programs": {"search": "/usr/bin:/bin"}
         })
     }
 
@@ -433,6 +537,73 @@ mod tests {
         }
         let view: View = serde_json::from_value(status).unwrap();
         render(&lines(&view, Path::new(PROGRAM)))
+    }
+
+    /// The fixture in background mode, with the rules file included and `dbus-daemon`
+    /// found, and each pointer's value replaced.
+    fn in_background(changes: Changes<'_>) -> Verdict {
+        let on = [
+            ("/background/enabled", json!(true)),
+            (
+                "/background/rules",
+                json!({
+                    "path": "/home/u/.config/niri/niri-computer-use.kdl",
+                    "config": "/home/u/.config/niri/config.kdl",
+                    "included": true,
+                    "error": null
+                }),
+            ),
+            ("/background/dbus_daemon", json!("/usr/bin/dbus-daemon")),
+        ];
+        with(&[&on[..], changes].concat())
+    }
+
+    #[test]
+    fn background_mode_needs_the_rules_include_and_dbus_daemon_for_its_private_bus() {
+        let ready = in_background(&[]);
+        assert!(
+            ready.text.contains("✓ background rules file: /home/u/.config/niri/niri-computer-use.kdl, included by /home/u/.config/niri/config.kdl\n✓ dbus-daemon: /usr/bin/dbus-daemon, for the private bus\n"),
+            "{}",
+            ready.text
+        );
+        assert_eq!(ready.blockers, 0, "{}", ready.text);
+        let unincluded = in_background(&[("/background/rules/included", json!(false))]);
+        assert!(
+            unincluded.text.contains("✗ background rules file: /home/u/.config/niri/config.kdl doesn't include /home/u/.config/niri/niri-computer-use.kdl, so no background desktop can start\n"),
+            "{}",
+            unincluded.text
+        );
+        assert!(
+            unincluded
+                .text
+                .contains("at the end of /home/u/.config/niri/config.kdl, so the rule a start writes comes after your own rules:\n      include \"niri-computer-use.kdl\""),
+            "{}",
+            unincluded.text
+        );
+        assert_eq!(unincluded.blockers, 1);
+        let no_daemon = in_background(&[("/background/dbus_daemon", json!(null))]);
+        assert!(
+            no_daemon.text.contains("✗ dbus-daemon: not found in /usr/bin:/bin, so the background desktop's private bus can't start\n    fix: install dbus-daemon"),
+            "{}",
+            no_daemon.text
+        );
+        assert_eq!(no_daemon.blockers, 1);
+        let host_bus = in_background(&[
+            ("/background/bus", json!("host")),
+            ("/background/dbus_daemon", json!(null)),
+        ]);
+        assert!(!host_bus.text.contains("dbus-daemon"), "{}", host_bus.text);
+        assert_eq!(host_bus.blockers, 0);
+        let refused = in_background(&[(
+            "/background/error",
+            json!("NIRI_COMPUTER_USE_BACKGROUND is \"on\"; it takes private, host or off"),
+        )]);
+        assert!(
+            refused.text.contains("✗ background desktop: NIRI_COMPUTER_USE_BACKGROUND is \"on\"; it takes private, host or off, so every call fails with background_unavailable\n"),
+            "{}",
+            refused.text
+        );
+        assert_eq!(refused.blockers, 1);
     }
 
     #[test]
@@ -640,6 +811,7 @@ Not ready: 1 blocker."
             confirm_lease: &settings.confirm_lease,
             tools: &settings.tools,
             shared: &settings.shared,
+            background: &settings.background,
             place: crate::test_support::no_programs(),
             apps: &settings.apps,
             accessibility: &crate::a11y::detect(None).await,

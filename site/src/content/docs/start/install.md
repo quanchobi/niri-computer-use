@@ -13,6 +13,7 @@ sidebar:
 - libxkbcommon, which the keyboard code links against. To build, its headers too (`libxkbcommon-dev` on Debian and Ubuntu, `libxkbcommon` on Arch).
 - At run time: `grim` for screenshots and `loginctl` from systemd for the lock state.
 - Optional: [Noctalia](../../concepts/noctalia/) 5.2 for its panels and lock state, and an accessibility bus (at-spi2-core) for [`elements`](../../tools/elements/).
+- Optional, for a [background desktop](../../concepts/configuration/#background): `include "niri-computer-use.kdl"` at the end of your niri config, with that file created first (see [First session](../first-session/#work-in-a-background-desktop)), and `dbus-daemon` for its private bus.
 - A monitor at transform `Normal`, for the pointer tools. `pointer_move`, `click`, `drag` and `scroll` act on the monitor of the screenshot they aim through, whatever other monitors there are; on a rotated monitor they refuse with [`untested_output_config`](../../reference/troubleshooting/#the-pointer-tools-fail-with-untested_output_config). The other tools, the keyboard and screenshots among them, work with any monitors.
 
 ## Two ways to install

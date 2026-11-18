@@ -16,6 +16,7 @@ Documentation: **https://ayagmar.github.io/niri-computer-use/**, also as plain M
 ## What it is
 
 - **Your real desktop, not a VM.** The agent looks at and acts on the screen you are working on.
+- **Or a background desktop, if you choose one.** The agent then works in a nested niri of its own, shown as one window on a workspace of its own, so your focus, keyboard, pointer and layout aren't touched. [First session](https://ayagmar.github.io/niri-computer-use/start/first-session/#work-in-a-background-desktop) has the setup.
 - **niri only, through niri's own IPC.** Windows, focus and layout come from niri. Where an app exposes its buttons and fields on the accessibility bus, the agent can act on them by name rather than by pixels. With a niri release other than 26.04 the server only looks; a 26.04 patch release works, with a warning in `status`.
 - **Guardrails, not a sandbox.** A lease, a stop key, a lock check and an audit log. An agent holding the lease can do anything you could do with a mouse and keyboard.
 
@@ -119,13 +120,14 @@ This is not a sandbox: agents see your screen, and with the lease they can do an
 - The pointer tools work on any monitor at transform `Normal`, one screenshot's monitor at a time, so a drag can't cross from one monitor to another. A rotated monitor refuses them. The keyboard, screenshots and the other tools work with any monitors.
 - Release builds exist for x86_64 and aarch64 only.
 - Accessibility varies by toolkit. GTK 4 works; GTK 3 and Qt apps that draw their own title bar give no element boxes, and niri 26.04 gives tiled windows none until they float. Activating an element and setting its text work in both cases.
+- A background desktop needs `include "niri-computer-use.kdl"` at the end of your niri config, and it isn't a sandbox: its apps run as you, with your files. With its private bus they get no keyring or portals, so a flatpak app's file dialog cancels; with your session bus, a single-instance app can hand its window to a copy already on your desktop.
 
 ## Documentation
 
 - [Install](https://ayagmar.github.io/niri-computer-use/start/install/), [The install script](https://ayagmar.github.io/niri-computer-use/start/install-script/) and [Client setup](https://ayagmar.github.io/niri-computer-use/start/clients/): install, check, and register the server in your agent
 - [Noctalia plugin](https://ayagmar.github.io/niri-computer-use/start/noctalia-plugin/): see which agent drives the desktop and what it does, and stop it from the bar
 - [Safety](https://ayagmar.github.io/niri-computer-use/concepts/safety/): what the server enforces, what it doesn't, and how you take the desktop back
-- [Configuration](https://ayagmar.github.io/niri-computer-use/concepts/configuration/): `policy.toml`, launch presets and desktop entries, the deny list, `unrestricted`, `confirm_lease`, the shared engine and tool profiles
+- [Configuration](https://ayagmar.github.io/niri-computer-use/concepts/configuration/): `policy.toml`, launch presets and desktop entries, the deny list, `unrestricted`, `confirm_lease`, the shared engine, tool profiles and background desktops
 - [Tools](https://ayagmar.github.io/niri-computer-use/tools/overview/): every tool, its arguments and results
 - [Error reference](https://ayagmar.github.io/niri-computer-use/reference/errors/) and [Troubleshooting](https://ayagmar.github.io/niri-computer-use/reference/troubleshooting/): what each error means and what to do
 - [CLI reference](https://ayagmar.github.io/niri-computer-use/reference/cli/): `serve`, `status`, `stop`, `resume`, `recover`, `watch`

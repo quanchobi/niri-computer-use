@@ -30,6 +30,8 @@ mod act;
 #[cfg(test)]
 mod audit;
 #[cfg(test)]
+mod background;
+#[cfg(test)]
 mod cancellation;
 #[cfg(test)]
 mod clients;

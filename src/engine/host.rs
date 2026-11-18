@@ -181,8 +181,9 @@ async fn accept(
     served
 }
 
-/// One client's connection: the hello, then its session.
-async fn connection(engine: Arc<Engine>, own: Arc<Own>, stream: UnixStream, busy: bool) {
+/// One client's connection: the hello, then its session. A shared engine's listener
+/// accepts it, or a background desktop's server makes it in its own process.
+pub(crate) async fn connection(engine: Arc<Engine>, own: Arc<Own>, stream: UnixStream, busy: bool) {
     let Ok(peer) = stream.peer_cred() else {
         return;
     };

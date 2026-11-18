@@ -76,6 +76,23 @@ pub(crate) fn niri_env(dir: &std::path::Path) -> crate::Env {
     }
 }
 
+/// Serves Noctalia's status on `env`'s Noctalia socket, saying the screen is locked.
+pub(crate) fn locked_noctalia(env: &crate::Env) {
+    let listener = tokio::net::UnixListener::bind(crate::noctalia::socket(env).unwrap()).unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            answer_locked(stream).await;
+        }
+    });
+}
+
+async fn answer_locked(mut stream: tokio::net::UnixStream) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut request = Vec::new();
+    stream.read_to_end(&mut request).await.ok();
+    stream.write_all(br#"{"locked": true}"#).await.ok();
+}
+
 /// A `PATH` with one directory that can't exist, so that nothing on the host runs.
 pub(crate) const NO_PROGRAMS: &str = "/dev/null/no-programs";
 
@@ -95,6 +112,7 @@ pub(crate) fn session(id: u64) -> crate::session::Session {
         confirm_lease: None,
         tools: None,
         shared: None,
+        background: None,
         home: None,
         path: Some(NO_PROGRAMS.into()),
         policy: crate::policy::Source::Missing,

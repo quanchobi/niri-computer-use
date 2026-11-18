@@ -139,6 +139,47 @@ async fn a_given_display_rules_out_a_niri_on_another_display() {
     }
 }
 
+/// A background desktop's nested niri shares the host's runtime directory. A client that
+/// passes neither variable still finds the host's niri, not two of them: the nested one's
+/// instance holds the desktop's record, naming it.
+#[tokio::test]
+async fn without_the_session_variables_a_background_desktops_niri_is_not_a_second_one() {
+    let mut fixture = Fixture::new("discover-background");
+    fixture.unset("NIRI_SOCKET");
+    fixture.unset("WAYLAND_DISPLAY");
+    let backend = fixture.path("run/backend.sock");
+    let _niri = Niri::listen(&backend);
+    let (_host, name) = NiriProcess::discoverable(&fixture, DISPLAY, &backend).await;
+    let (_nested, nested) = NiriProcess::discoverable(&fixture, "wayland-9", &backend).await;
+    let ambiguous = status(&fixture).await;
+    let error = ambiguous["niri"]["error"]["detail"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(error.contains("2 running niri instances"), "{ambiguous}");
+
+    let pid: u32 = nested.rsplit('.').nth(1).unwrap().parse().unwrap();
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let (_, after_name) = stat.rsplit_once(") ").unwrap();
+    let start_time: u64 = after_name.split(' ').nth(19).unwrap().parse().unwrap();
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+    let host = name.strip_suffix(".sock").unwrap();
+    crate::control::background_desktop(
+        &fixture,
+        host,
+        &nested,
+        &json!({"pid": pid, "start_time": start_time, "boot_id": boot_id.trim()}),
+    );
+    let found = status(&fixture).await;
+    assert_eq!(found["instance"], name, "{found}");
+    assert!(found["niri"]["error"].is_null(), "{found}");
+}
+
+/// What the `status` subcommand prints.
+async fn status(fixture: &Fixture) -> Value {
+    let status = crate::client::run(fixture, "status").await;
+    serde_json::from_slice(&status.stdout).unwrap()
+}
+
 /// niri's socket is served by a process of its own, which relays to the fake niri, while
 /// the test's process serves the fixture's display, as another compositor would. Focus,
 /// policy, lock and lease all pass; only the display's peer is wrong.

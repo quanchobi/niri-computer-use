@@ -5,7 +5,7 @@ sidebar:
   order: 1
 ---
 
-An agent using niri-computer-use works on your real desktop, with your apps and your files. A click or a key can do anything you could do. The server adds guardrails that catch mistakes and keep you in control; it is not a sandbox. To report a security problem, see [SECURITY.md](https://github.com/ayagmar/niri-computer-use/blob/main/SECURITY.md).
+An agent using niri-computer-use works on your real desktop, with your apps and your files, unless you give it a [background desktop](#background-desktops), and even then it works with your files. A click or a key can do anything you could do. The server adds guardrails that catch mistakes and keep you in control; it is not a sandbox. To report a security problem, see [SECURITY.md](https://github.com/ayagmar/niri-computer-use/blob/main/SECURITY.md).
 
 ## The lease
 
@@ -25,7 +25,7 @@ Bind `niri-computer-use stop` to a key in your niri config (see [First session](
 - takes the lease back from the agent, once a screenshot or readiness check under way has finished
 - refuses every later `acquire_desktop` and action with `stopped`
 
-The flag stays until you run `niri-computer-use resume`. An agent can't press the stop key: niri's keybinds don't fire from the virtual keyboard and pointer the server uses.
+The flag stays until you run `niri-computer-use resume`. An agent can't press the stop key: niri's keybinds don't fire from the virtual keyboard and pointer the server uses. `stop` and `resume` also set and clear the flag of every [background desktop](#background-desktops) started from your niri, so the key and the plugin's Stop reach agents working there too.
 
 ## Input that may be stuck, and `recover`
 
@@ -47,7 +47,7 @@ If the guardian dies too, as when the whole service is killed at once, the next 
 
 The server acts only on a screen it knows is unlocked. It asks logind for niri's session's `LockedHint` and, when Noctalia runs, Noctalia's own lock state. If either says locked, or neither can answer, `acquire_desktop` and every action refuse with `screen_locked`. The state is checked again before each action, because the screen can lock while an agent holds the lease, and an action's request, input or command goes out at most 250 ms after that check began. When the check is older by then, it runs again, and an action that still can't go out in time is refused with `lock_stale`, having sent nothing. A lock that comes after that check isn't caught.
 
-logind only knows the lock state when niri runs as `niri --session`. Without that and without Noctalia, the state is `unknown` and the server won't act.
+logind only knows the lock state when niri runs as `niri --session`. Without that and without Noctalia, the state is `unknown` and the server won't act. A background desktop's nested niri has no lock screen of its own: its lock state is your desktop's, so locking your screen stops its agent too.
 
 Looking stops too while the screen is locked. `screenshot`, `elements` and `wait_for` are refused with `screen_locked`, `elements` and `wait_for` also when the screen locked while they ran, and `desktop_state` leaves window titles out. niri already draws only the lock screen into screenshots then; accessible names and window titles come from the apps and niri's IPC, which the lock screen doesn't stop. Here an `unknown` state doesn't refuse: actions already refuse then, and refusing looks as well would leave nothing working for a session without `niri --session` or Noctalia.
 
@@ -72,6 +72,25 @@ Every action reports `accepted`, whether niri took the request, and `observed`, 
 
 Each call that reaches a tool is appended to `~/.local/state/niri-computer-use/audit.jsonl` (or under `$XDG_STATE_HOME`): the time, the client, the tool, its arguments and the outcome. A call to a tool that isn't listed is refused before that and isn't logged. A call with arguments that don't match the tool's schema is refused before the tool runs and logged as `invalid_arguments` with the names of the first 32 fields it was given and a count of the rest, never their values. In [shared mode](../configuration/#shared), a call the server answers with `engine_lost` or `engine_unavailable` is written too, by the server itself, since the engine never saw it or ended first: with its tool and outcome, and `{}` for its arguments. A failed write doesn't stop the call; `status.audit.last_error` shows it. The directory is `0700` and the file `0600`. When the log reaches 10 MiB it is renamed to `audit.jsonl.1` before the next line, and the older ones move up to `audit.jsonl.3`; the oldest beyond that is deleted, so the logs take at most about 40 MiB. Typed and pasted text, clipboard contents, window titles and images are never written; the log keeps their length. Other text the agent gives is written only when it names something the server knows: a preset, a desktop entry `launch` found, a Noctalia panel, an accessibility role, a ref the server issued, or key names XKB knows. Anything else is written as a category and its length, so a window title an agent copies into a field stays out of the log. An `expect` app id is written as its length and whether focus matched it, a screenshot's target as `focused_output`, `output` or `region`, and a save path as its length. Text the agent passes on goes the same way: `niri_action` logs the action's name and field names, its numbers and booleans, and every string, such as a `Spawn` command, as its length in bytes, and JSON that isn't a niri action only as its size; `noctalia` logs how many arguments and how long, and the command's name and description and a plugin's id only when Noctalia's own lists name them. Of an action's `changes`, only counts are written: windows opened, closed and changed, whether focus and the workspace moved, and how many elements were added, removed and changed. A `key` or `type_text` call that failed after some of its input went out, or may have, is written with `may_have_sent: true`.
 
+## Background desktops
+
+With [`[background]`](../configuration/#background) in the policy file, or `NIRI_COMPUTER_USE_BACKGROUND` in a client's server settings, the agent works in a nested niri of its own, shown as one window on a workspace of its own on your desktop. Only you choose this; no tool lets an agent start, stop or leave one. It keeps apart:
+
+- your focus, keyboard, pointer and layout. The agent's input goes to the nested niri, whose window never takes focus, and its niri actions change only the nested layout.
+- what is on your screen. Its screenshots, `desktop_state` and `elements` show only the nested niri and the apps in it.
+- the lease. The nested niri is an instance of its own, with its own lease, so its agent neither holds nor waits for yours.
+- with the private bus, the default, your session bus. The apps it starts get a `dbus-daemon` of their own, so portals and single-instance hand-offs over D-Bus don't reach your desktop.
+
+It doesn't keep apart:
+
+- your files, network and programs. The apps it starts run as you, with your home directory and your runtime directory, where your desktop's sockets are.
+- with `bus = "host"`, your session bus. Its apps get your keyring and saved logins, a single-instance app can hand its window to a copy already running on your desktop, and a portal's dialog, such as a file chooser, opens on your desktop.
+- the agent's own shell, when its client has one: that runs on your desktop, whatever the server drives.
+
+The private bus has no portals and no keyring: a flatpak app's file dialog cancels, and apps find none of your saved logins.
+
+You keep control as on your desktop. Its lock state is your desktop's, `stop`, the stop key and the plugin's Stop reach it, every call goes to the same audit log, and the lease notifications still appear on your desktop. The window rule that places the nested niri is written only to `niri-computer-use.kdl`, which your config includes, and only while a desktop starts.
+
 ## What isn't a boundary
 
 - Screenshots, window titles and accessible names reach any connected agent without a lease. Connect only agents you trust with what is on your screen. While the screen is known to be locked (`status.lock.state` is `locked`), they don't; with another locker and neither logind's hint nor Noctalia, the state is `unknown` and they still do. See [The lock gate](#the-lock-gate).
@@ -84,4 +103,4 @@ Each call that reaches a tool is appended to `~/.local/state/niri-computer-use/a
 - You can still type and click while an agent works. The server notices focus moving and stops typing, but nothing keeps you and an agent from moving the pointer at the same time.
 - The lease belongs to a server process. Anything that runs as your user can start `niri-computer-use` too.
 
-For a stronger limit, give the agent a separate desktop holding only the apps it may use, such as a nested niri session.
+A background desktop keeps the agent off your screen, not out of your account. For a stronger limit, the agent and its apps need an account or a sandbox of their own, which the server doesn't set up.

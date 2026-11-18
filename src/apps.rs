@@ -503,6 +503,7 @@ mod tests {
                 confirm_lease: None,
                 tools: None,
                 shared: None,
+                background: None,
                 home: None,
                 path: Some(crate::test_support::NO_PROGRAMS.into()),
                 policy: Source::Text {

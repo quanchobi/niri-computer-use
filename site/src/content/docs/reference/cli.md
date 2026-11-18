@@ -27,13 +27,13 @@ niri-computer-use status
 
 Prints the readiness report as JSON and exits 0, whatever the report says. It is the same report as the `status` tool, except that `niri.event_stream` is null, because the subcommand opens no event stream, and `lease.held_by_me` is false. The fields are described under [`status`](../../tools/looking/#status).
 
-It asks niri for its version, its outputs and whether its last config load failed, logind for the lock state and, when it finds `noctalia`, Noctalia for its status. It reads niri's config files for the [stop key](../../tools/looking/#status). It changes nothing.
+It asks niri for its version, its outputs and whether its last config load failed, logind for the lock state and, when it finds `noctalia`, Noctalia for its status. It reads niri's config files for the [stop key](../../tools/looking/#status). In background mode it also reads them for the rules file's include. It changes nothing. An agent in a background desktop gets the host's lock state, Noctalia and stop key in its own `status`, since the user locks, and stops agents from, the host.
 
 ```sh
 niri-computer-use status --check
 ```
 
-Prints the same report as one line per prerequisite, `✓` or `✗`, with a `fix:` line under each `✗`, then `Ready.` or `Not ready: N blockers.`, and exits 1 while there is a blocker. The lines are niri and its version, the Wayland display, the lock state, the pointer on niri's outputs, `grim`, the accessibility bus, the stop key, the stop flag and the input-dirty marker while set, the policy file, the lease notification while `notify-send` is missing, and any server setting a variable got wrong. A `✗` marked `(optional)` turns one feature off and isn't a blocker: the pointer, the accessibility bus, a stop key it can't tell about, the lease notification, a refused variable. Without niri, the lines that need niri are left out. It doesn't check the shared engine, which runs only while agents are connected; an agent's own `status` says, under `engine.fallback`, why it is served standalone. On a desktop with everything in place:
+Prints the same report as one line per prerequisite, `✓` or `✗`, with a `fix:` line under each `✗`, then `Ready.` or `Not ready: N blockers.`, and exits 1 while there is a blocker. The lines are niri and its version, the Wayland display, the lock state, the pointer on niri's outputs, `grim`, the accessibility bus, the stop key, the stop flag and the input-dirty marker while set, the policy file, the lease notification while `notify-send` is missing, and any server setting a variable got wrong. In background mode they also include the background setting when it can't be used, whether the host niri's config includes the rules file, and, for the private bus, `dbus-daemon`; each of those is a blocker, and the include's fix gives the line to add. A `✗` marked `(optional)` turns one feature off and isn't a blocker: the pointer, the accessibility bus, a stop key it can't tell about, the lease notification, a refused variable. Without niri, the lines that need niri are left out. It doesn't check the shared engine, which runs only while agents are connected; an agent's own `status` says, under `engine.fallback`, why it is served standalone. On a desktop with everything in place:
 
 ```text
 ✓ niri 26.04 (8ed0da4): supported
@@ -53,7 +53,7 @@ Ready.
 niri-computer-use stop
 ```
 
-Sets the stop flag for this niri instance, prints nothing and exits 0. A running action is cancelled: it ends with `stopped`, or `uncertain` once what it sent may have taken effect (see [Safety](../../concepts/safety/#stop-and-resume)). The lease holder gives the lease up, and `acquire_desktop` and every action refuse with `stopped` until `resume`. Bind it to a key: see [First session](../../start/first-session/#bind-the-stop-key).
+Sets the stop flag for this niri instance and for every [background desktop](../../concepts/configuration/) started from it, prints nothing and exits 0. A running action is cancelled: it ends with `stopped`, or `uncertain` once what it sent may have taken effect (see [Safety](../../concepts/safety/#stop-and-resume)). The lease holder gives the lease up, and `acquire_desktop` and every action refuse with `stopped` until `resume`. Bind it to a key: see [First session](../../start/first-session/#bind-the-stop-key). A background desktop's flag that can't be set is reported after the others were set, and `stop` then exits 1.
 
 It never connects to niri, so it works while niri hangs. Without `NIRI_SOCKET`, it takes the one socket in the runtime directory that niri names, owned by you, whose PID is a running `niri`, without checking that this niri still listens on it. It fails, exiting 1, when there is no such socket or several, when niri's socket doesn't resolve to a socket of yours, with no hard link, in a directory only you can use, or when the flag can't be written.
 
@@ -63,7 +63,7 @@ It never connects to niri, so it works while niri hangs. Without `NIRI_SOCKET`, 
 niri-computer-use resume
 ```
 
-Clears the stop flag, prints nothing and exits 0, also when no flag was set. It finds niri's socket the way `stop` does. It refuses while the input-dirty marker exists, and doesn't clear it; `recover` does.
+Clears the stop flag, for this niri instance and every background desktop started from it, prints nothing and exits 0, also when no flag was set. It finds niri's socket the way `stop` does. It refuses while the input-dirty marker exists, and doesn't clear it; `recover` does. A background desktop it refuses, for its own input-dirty marker, is named after the other flags were cleared, and `resume` then exits 1.
 
 ## `watch`
 

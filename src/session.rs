@@ -12,10 +12,11 @@ use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{Semaphore, SemaphorePermit, oneshot, watch};
 
 use crate::apps;
+use crate::policy::background::Background;
 use crate::policy::{self, Loaded, Shared, Switch, Tools};
 use crate::runner::Place;
 
-/// What a client's own environment gives its session, and no other: its four variables,
+/// What a client's own environment gives its session, and no other: its five variables,
 /// its home, the policy file as read from its config directory, and where its desktop
 /// entries are.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +30,8 @@ pub(crate) struct Given {
     /// `NIRI_COMPUTER_USE_SHARED`, as given: whether the client is served by the shared
     /// engine. A shared engine's session gets the setting its bridge decided instead.
     pub(crate) shared: Option<OsString>,
+    /// `NIRI_COMPUTER_USE_BACKGROUND`, as given: `private`, `host` or `off`.
+    pub(crate) background: Option<OsString>,
     /// `$HOME`, for a `capture_dir` under `~/`.
     pub(crate) home: Option<PathBuf>,
     /// `$PATH`, where the session's own programs, such as `grim`, are found. Empty
@@ -54,6 +57,7 @@ impl Given {
             confirm_lease: var("NIRI_COMPUTER_USE_CONFIRM_LEASE"),
             tools: var("NIRI_COMPUTER_USE_TOOLS"),
             shared: var("NIRI_COMPUTER_USE_SHARED"),
+            background: var("NIRI_COMPUTER_USE_BACKGROUND"),
             apps: apps::Search::read(var, home.as_deref()),
             home,
             path,
@@ -77,6 +81,9 @@ pub(crate) struct Settings {
     /// Whether the client is served by the shared engine, from the policy file and the
     /// session's variable.
     pub(crate) shared: Shared,
+    /// Whether the server drives a background desktop, from the policy file, the
+    /// session's variable and `shared`.
+    pub(crate) background: Background,
     /// The session's home, for a `capture_dir` under `~/`.
     pub(crate) home: Option<PathBuf>,
     /// The session's `PATH`, where `grim` is found for its calls.
@@ -99,6 +106,10 @@ impl Settings {
             given.unrestricted.as_deref(),
         );
         let policy = Loaded::from_source(&given.policy, env_on == Ok(true));
+        let shared = Shared {
+            policy: policy.shared(&given.policy),
+            env: Shared::parse_env(given.shared.as_deref()),
+        };
         Self {
             unrestricted: Switch {
                 policy: policy.unrestricted(),
@@ -119,10 +130,12 @@ impl Settings {
                 policy: policy.tools(),
                 env: Tools::parse_env(given.tools.as_deref()),
             },
-            shared: Shared {
-                policy: policy.shared(&given.policy),
-                env: Shared::parse_env(given.shared.as_deref()),
+            background: Background {
+                policy: policy.background(&given.policy),
+                env: Background::parse_env(given.background.as_deref()),
+                sharing: shared.setting(),
             },
+            shared,
             policy,
             home: given.home,
             path: given.path,
@@ -494,6 +507,7 @@ mod tests {
             confirm_lease: Some("true".into()),
             tools: None,
             shared: None,
+            background: None,
             home: None,
             path: None,
             policy: policy::Source::Missing,

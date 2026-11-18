@@ -193,6 +193,10 @@ pub(crate) struct Hello {
     confirm_lease: Option<String>,
     tools: Option<String>,
     shared: Option<String>,
+    /// `NIRI_COMPUTER_USE_BACKGROUND`, which only a server's own engine of a background
+    /// desktop gets. Bridges of 0.1.8 and older send none.
+    #[serde(default)]
+    background: Option<String>,
     home: Option<PathBuf>,
     path: Option<String>,
     policy: policy::Source,
@@ -246,6 +250,7 @@ impl Hello {
             confirm_lease: utf8("NIRI_COMPUTER_USE_CONFIRM_LEASE", given.confirm_lease)?,
             tools: utf8("NIRI_COMPUTER_USE_TOOLS", given.tools)?,
             shared: utf8("NIRI_COMPUTER_USE_SHARED", given.shared)?,
+            background: utf8("NIRI_COMPUTER_USE_BACKGROUND", given.background)?,
             home: given.home,
             path: utf8("PATH", given.path)?,
             policy,
@@ -260,6 +265,7 @@ impl Hello {
             confirm_lease: self.confirm_lease.map(Into::into),
             tools: self.tools.map(Into::into),
             shared: self.shared.map(Into::into),
+            background: self.background.map(Into::into),
             home: self.home,
             path: self.path.map(Into::into),
             policy: self.policy,
@@ -497,6 +503,7 @@ mod tests {
             confirm_lease: Some("1".to_owned()),
             tools: Some("act".to_owned()),
             shared: Some("required".to_owned()),
+            background: Some("host".to_owned()),
             home: Some(PathBuf::from("/home/me")),
             path: Some("bin::/usr/bin".to_owned()),
             policy: policy::Source::Text {
@@ -538,6 +545,7 @@ mod tests {
                 confirm_lease: Some("1".into()),
                 tools: Some("act".into()),
                 shared: Some("required".into()),
+                background: Some("host".into()),
                 home: Some(PathBuf::from("/home/me")),
                 path: Some("bin::/usr/bin".into()),
                 policy: sent.policy,
@@ -795,6 +803,7 @@ mod tests {
             confirm_lease: None,
             tools: None,
             shared: None,
+            background: None,
             home: None,
             path: None,
             policy: policy::Source::Text {

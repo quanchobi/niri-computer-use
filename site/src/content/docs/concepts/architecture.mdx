@@ -14,11 +14,28 @@ These drawings follow the code. The full account, module by module, is [docs/arc
 
 ## Processes
 
-Your agent starts `niri-computer-use serve` over stdio, one per session. By default every `serve` on one niri relays to a single engine, and starts that engine when none is running. With [`shared = false`](../configuration/#shared) or `NIRI_COMPUTER_USE_SHARED=0`, `serve` runs the engine itself. The engine holds the lease and talks to niri, the accessibility bus and Noctalia. It runs `grim`, `notify-send` and `loginctl` through one runner, each with a deadline. The crash guardian is the same binary watching the engine: if the engine dies while its virtual pointer or keyboard holds a button or key, the guardian sends the release.
+Your agent starts `niri-computer-use serve` over stdio, one per session. By default every `serve` on one niri relays to a single engine, and starts that engine when none is running. With [`shared = false`](../configuration/#shared) or `NIRI_COMPUTER_USE_SHARED=0`, `serve` runs the engine itself, and so it does for a [background desktop](#background-desktop), on a nested niri. The engine holds the lease and talks to niri, the accessibility bus and Noctalia. It runs `grim`, `notify-send` and `loginctl` through one runner, each with a deadline. The crash guardian is the same binary watching the engine: if the engine dies while its virtual pointer or keyboard holds a button or key, the guardian sends the release.
 
 <ProcessMap />
 
 The lease, the stop flag and the input-dirty marker are files in a directory beside niri's socket. Every server on the same niri sees the same files, in either mode.
+
+## Background desktop
+
+With [`[background]`](../configuration/#background) or `NIRI_COMPUTER_USE_BACKGROUND`, `serve` reaches no shared engine. Until the client's first tool call it answers the handshake and `tools/list` itself, and that call starts a background desktop for this client alone, then an engine inside `serve` to drive it. The start runs under `background.start.lock` in your niri's runtime directory, waiting up to 20 seconds for another start, because the window rule it writes matches any nested niri. It keeps a record, `background.json`, in its work directory, `background/<server pid>-<start time>/` beside that lock, and writes it before each step that leaves something to undo:
+
+1. It tears down each background desktop whose server has ended, as its record names it.
+2. It finds `niri-computer-use.kdl` beside the config your niri loaded, creates it with only a comment when it is missing, and checks that the config includes it.
+3. It names the focused output's last workspace, which niri keeps empty, `agent-<project>`.
+4. It writes the window rule into the rules file and waits for your niri to load it, starts the nested niri and waits for its window, then puts the rules file back to its comment and waits for that load too. A window that opened elsewhere is moved to the workspace, unfocused.
+5. It waits for the nested niri's socket to answer, then, with the private bus, starts `dbus-daemon` and waits for its address. The bus's address was decided before the nested niri started, which got it; the bus starts after, so the services it starts get the nested display.
+6. It writes the record to the nested instance's runtime directory, where that engine's crash guardian looks, and names the nested instance in the work directory. When your niri instance is stopped, it stops the nested one too.
+
+The nested niri is the same program as yours, with a config of its own and the server's environment, minus what would reach your niri, your X server or let its window take focus, plus your display, its bus, `vblank_mode=0` and `__GL_SYNC_TO_VBLANK=0`. Those two give Mesa's and NVIDIA's EGL a swap interval of 0: your niri sends frame callbacks slowly for a workspace it doesn't show, and without them the nested niri's loop waited for each one whenever an app redrew. A step that fails undoes what the start did.
+
+When the client ends, or `serve` gets `SIGTERM`, `SIGHUP` or `SIGINT`, it ends the engine's sessions, waits for their input cleanups, and tears the desktop down. It ends the nested niri and the bus with `SIGTERM`, then `SIGKILL` after five seconds, signalling a process it holds no handle on only while its recorded PID, start time and boot still match. It takes the name off the workspace by its ID, while that workspace still has it, restores the rules file while it may hold the rule, and removes both directories; the work directory stays when a process didn't end, for the next start to try again. When `serve` dies, the engine's crash guardian tears the desktop down from the record. When the guardian dies too, the next background desktop's start does, in step 1.
+
+The nested niri's socket sits beside yours, so discovery skips a socket whose instance holds a running background desktop's record naming that niri, unless a given `WAYLAND_DISPLAY` names it. `stop` and `resume` set and clear the nested instances' flags with yours, and the lock state and the stop key's check are read from your niri, so your lock screen and your stop key reach the agent.
 
 ## One action
 
