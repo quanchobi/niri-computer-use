@@ -1,7 +1,9 @@
 //! Wakes `watch` as soon as something changes in the runtime directory, so a stop, a
 //! lease and the action in progress show at once instead of at the next poll. The poll
 //! stays the deadline: a directory that doesn't exist yet, or was replaced, is watched
-//! again from the next poll on, and until then the poll alone serves, as before.
+//! again from the next poll on, and until then the poll alone serves, as before. Only the
+//! host instance's directory is watched: the background desktops' runtime directories
+//! are read at each poll and each wake (see `run`), with the poll as their deadline.
 
 use std::io;
 use std::path::PathBuf;

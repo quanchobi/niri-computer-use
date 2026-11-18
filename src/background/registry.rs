@@ -2,7 +2,7 @@
 //! the host's runtime directory list them. A desktop counts once its start has named its
 //! nested instance there (`instance`), right after it wrote its record to the nested
 //! instance's runtime directory, and until its teardown removes the work directory.
-//! `stop` and `resume` reach the background desktops through this.
+//! `stop`, `resume` and `watch` reach the background desktops through this.
 
 use std::io;
 use std::path::Path;

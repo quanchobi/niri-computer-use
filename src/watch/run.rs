@@ -1,6 +1,12 @@
 //! The `watch` loop: polls the runtime directory and follows the audit log, writing a
 //! line whenever something changed. A change in the runtime directory wakes it between
 //! polls (`wake`), to read the lease, the flags and the action in progress at once.
+//!
+//! The background desktops started from this instance are read afresh at every poll and
+//! every wake: the work directories that list them, and each nested instance's lease and
+//! stop flag. Their directories aren't watched, since there is one more for each desktop
+//! and each is made and removed with it; the poll is their deadline, so a change there
+//! shows within `POLL`. A `stop` sets the host's flag first, which wakes `watch` at once.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,8 +17,10 @@ use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 use super::tail::Tail;
 use super::wake::{Wake, Woken};
 use super::{
-    BACKLOG, Client, Driver, Event, FORMAT, LiveKey, State, action, clients, label_pid, live,
+    BACKLOG, Background, Client, Driver, Event, FORMAT, LiveKey, State, action, clients, label_pid,
+    live,
 };
+use crate::background::registry::{self, Registered};
 use crate::control::lease;
 use crate::control::runtime::RuntimeDir;
 
@@ -149,12 +157,13 @@ impl Seen<'_> {
             .and(self.state.as_ref())
             .map(|state| state.clients.clone());
         let now = desk(self.watched, &mut self.projects, known);
+        let now_background = now.background.clone();
         if self.state.as_ref() != Some(&now) {
             out.send(&Event::State(&now)).await?;
             self.state = Some(now);
         }
         for line in lines {
-            if let Some(call) = action(&line, &self.watched.instance) {
+            if let Some(call) = action(&line, &self.watched.instance, &now_background) {
                 out.send(&Event::Action(self.projects.annotate(call, backlog)))
                     .await?;
             }
@@ -214,6 +223,25 @@ fn desk(watched: &Watched, projects: &mut Projects<'_>, known: Option<Vec<Client
         stopped: runtime.stopped().unwrap_or(false),
         input_dirty: crate::control::marker::stuck(runtime, &watched.proc_root),
         clients: known.unwrap_or_else(|| clients::scan(&watched.proc_root, &watched.instance)),
+        background: registry::registered(runtime)
+            .into_iter()
+            .flatten()
+            .map(|desktop| background(&desktop, projects))
+            .collect(),
+    }
+}
+
+/// What `watch` shows of the background desktop `desktop`.
+fn background(desktop: &Registered, projects: &mut Projects<'_>) -> Background {
+    Background {
+        instance: desktop.instance.clone(),
+        workspace: desktop.name().to_owned(),
+        bus: desktop.record.bus,
+        lease: lease::holder(&desktop.nested).map(|holder| {
+            let project = projects.of(&holder.label);
+            Driver::new(holder, project)
+        }),
+        stopped: desktop.nested.stopped().unwrap_or(false),
     }
 }
 
@@ -517,6 +545,70 @@ mod tests {
         assert_eq!(event(&mut lines).await["event"], "hello");
         assert_eq!(event(&mut lines).await["event"], "state");
         assert_eq!(event(&mut lines).await["tool"], "status");
+        watch.abort();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn lists_the_background_desktops_and_their_calls_but_not_their_live_records() {
+        let dir = crate::test_support::fresh_dir("watch-background");
+        let watched = watched(&dir);
+        watched.runtime.create().unwrap();
+        let socket = dir.join("niri.wayland-2.42.sock");
+        crate::background::record::Record::running(&watched.runtime, "1-1", &socket, "shop");
+        let nested = RuntimeDir::for_socket(&socket).unwrap();
+        let mut held = lease::Lease::acquire(&nested, "claude-code/4711").unwrap();
+        held.publish().unwrap();
+        replace_live(
+            &nested,
+            r#"{"pid":4711,"call":1,"phase":"aim","tool":"click"}"#,
+        );
+        let (writer, reader) = tokio::io::duplex(64 * 1024);
+        let watch = tokio::spawn(async move {
+            let Err(_) = follow(&watched, writer, Duration::from_millis(10)).await;
+        });
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        assert_eq!(event(&mut lines).await["event"], "hello");
+        let state = event(&mut lines).await;
+        assert!(state["lease"].is_null(), "{state}");
+        let desktop = &state["background"][0];
+        assert_eq!(
+            (
+                desktop["instance"].as_str(),
+                desktop["workspace"].as_str(),
+                desktop["bus"].as_str(),
+                desktop["stopped"].as_bool()
+            ),
+            (
+                Some("niri.wayland-2.42.sock"),
+                Some("agent-shop"),
+                Some("private"),
+                Some(false)
+            ),
+            "{state}"
+        );
+        assert_eq!(desktop["lease"]["session"], "claude-code/4711", "{state}");
+        assert_eq!(desktop["lease"]["project"], "shop", "{state}");
+        record(
+            &dir,
+            r#"{"session":"claude-code/4711","instance":"niri.wayland-2.42.sock","tool":"click"}"#,
+        );
+        let click = event(&mut lines).await;
+        assert_eq!(
+            (
+                click["event"].as_str(),
+                click["background"].as_str(),
+                click["project"].as_str()
+            ),
+            (Some("action"), Some("agent-shop"), Some("shop")),
+            "{click}"
+        );
+        nested.stop().unwrap();
+        let stopped = event(&mut lines).await;
+        assert_eq!(stopped["event"], "state", "no live line: {stopped}");
+        assert_eq!(stopped["background"][0]["stopped"], true, "{stopped}");
+        assert_eq!(stopped["stopped"], false, "{stopped}");
+        drop(held);
         watch.abort();
         std::fs::remove_dir_all(dir).unwrap();
     }

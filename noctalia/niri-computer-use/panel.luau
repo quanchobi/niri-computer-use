@@ -1,6 +1,7 @@
 --!nonstrict
 -- The panel: who drives the desktop, in which project and for how long, a Stop
--- or Resume button, and the calls agents made, newest at the bottom.
+-- or Resume button, the agents working in background desktops, and the calls
+-- agents made, newest at the bottom.
 
 local look = require("./lib/look.luau")
 local actions = require("./lib/actions.luau")
@@ -30,14 +31,18 @@ end
 local STOPPABLE = { driving = true, asking = true, starting = true, offline = true, error = true }
 
 -- Whether Stop can do something now: also while idle just after an agent gave
--- the desktop back, as agents do before taking it again.
+-- the desktop back, as agents do before taking it again, and while an agent
+-- works in a background desktop, which Stop reaches too.
 local function stoppable(): boolean
-  return STOPPABLE[view.status] or (view.status == "idle" and view.justReleased)
+  return STOPPABLE[view.status]
+    or (view.status == "idle" and view.justReleased)
+    or desk.working(view.background or {}) > 0
 end
 
--- Resume once stopped, Stop where it can do something, otherwise nothing.
+-- Resume once stopped, the desktop or a background one, Stop where it can do
+-- something, otherwise nothing.
 local function controls()
-  if view.stopped then
+  if view.stopped or desk.anyStopped(view.background or {}) then
     return ui.button({
       text = tr("panel.resume"),
       glyph = "player-play",
@@ -115,6 +120,9 @@ local function row(call, now: number, showWho: boolean)
   if call.detail then
     table.insert(meta, call.detail)
   end
+  if call.background then
+    table.insert(meta, tr("panel.background_on", { workspace = call.background }))
+  end
   if call.error then
     table.insert(meta, call.error)
   end
@@ -139,7 +147,19 @@ local function serverPid(session: string?): number?
   return if session then tonumber(session:match("/(%d+)$")) else nil
 end
 
-local function agentRow(group)
+-- The server PIDs holding a background desktop.
+local function inBackground(): { [number]: boolean }
+  local pids = {}
+  for _, item in view.background or {} do
+    local pid = serverPid(item.lease and item.lease.session)
+    if pid then
+      pids[pid] = true
+    end
+  end
+  return pids
+end
+
+local function agentRow(group, background: { [number]: boolean })
   local text = if group.project then tr("panel.agent_in", { agent = group.name, project = group.project }) else group.name
   local notes, role = {}, "on_surface_variant"
   if #group.pids > 1 then
@@ -148,6 +168,13 @@ local function agentRow(group)
   if group.driving then
     table.insert(notes, tr("panel.agent_driving"))
     role = "primary"
+  end
+  for _, pid in group.pids do
+    if background[pid] then
+      table.insert(notes, tr("panel.agent_background"))
+      role = "primary"
+      break
+    end
   end
   if group.replaced then
     table.insert(notes, tr("panel.agent_old"))
@@ -215,8 +242,9 @@ local function agentList()
     return nil
   end
   local rows = {}
+  local background = inBackground()
   for _, group in groups do
-    table.insert(rows, agentRow(group))
+    table.insert(rows, agentRow(group, background))
   end
   local title = agentsTitle(#agents, desk.outdated(agents))
   if #groups <= FOLD_PAST then
@@ -230,6 +258,46 @@ local function agentList()
     return ui.column({ gap = 2 }, { title, list, foldRow(hidden) })
   end
   return ui.column({ gap = 2 }, { title, rows[1], foldRow(hidden) })
+end
+
+-- One background desktop: its workspace, who works there, and whether it is
+-- stopped.
+local function backgroundRow(item)
+  local notes, role = {}, "on_surface_variant"
+  if item.lease then
+    local who = if item.lease.project then tr("notify.who_in", { client = item.lease.client, project = item.lease.project }) else item.lease.client
+    table.insert(notes, tr("panel.background_working", { who = who }))
+    role = "primary"
+  else
+    table.insert(notes, tr("panel.background_idle"))
+  end
+  if item.stopped then
+    table.insert(notes, tr("panel.background_stopped"))
+    role = "error"
+  end
+  return ui.row({ key = `background-{item.instance}`, gap = 10, align = "center", paddingV = 3, tooltip = item.instance }, {
+    ui.glyph({ name = "app-window", size = 16, color = role }),
+    ui.label({ text = item.workspace, maxLines = 1, flexGrow = 1 }),
+    ui.label({ text = table.concat(notes, " · "), fontSize = 11, color = role }),
+  })
+end
+
+-- The background desktops started from this desktop, if any.
+local function backgroundList()
+  local list = view.background or {}
+  if #list == 0 then
+    return nil
+  end
+  local rows = {
+    ui.row({ gap = 6, align = "center" }, {
+      ui.label({ text = tr("panel.background"), fontWeight = "bold" }),
+      ui.label({ text = tostring(#list), color = "on_surface_variant", flexGrow = 1 }),
+    }),
+  }
+  for _, item in list do
+    table.insert(rows, backgroundRow(item))
+  end
+  return ui.column({ gap = 2 }, rows)
 end
 
 local function feed(now: number)
@@ -294,6 +362,10 @@ function render()
   local list = agentList()
   if list then
     table.insert(children, list)
+  end
+  local background = backgroundList()
+  if background then
+    table.insert(children, background)
   end
   table.insert(children, heading())
   table.insert(children, feed(now))

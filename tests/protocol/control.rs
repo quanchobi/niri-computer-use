@@ -184,6 +184,59 @@ async fn stop_and_resume_reach_the_background_desktops() {
     assert!(!nested.join("stop").exists());
 }
 
+/// The host's `watch` lists the background desktop, and shows its stop.
+#[tokio::test]
+async fn watch_lists_the_background_desktops() {
+    use tokio::io::AsyncBufReadExt as _;
+
+    let fixture = Fixture::new("watch-background");
+    let nested = background_desktop(
+        &fixture,
+        "niri.test",
+        "niri.wayland-9.1.sock",
+        &serde_json::Value::Null,
+    );
+    let mut watch = subcommand_to(&fixture, "watch", Stdio::piped());
+    let mut lines = tokio::io::BufReader::new(watch.stdout.take().unwrap()).lines();
+    let state = next_state(&mut lines).await;
+    assert_eq!(
+        state["background"],
+        serde_json::json!([{
+            "instance": "niri.wayland-9.1.sock",
+            "workspace": "agent-shop",
+            "bus": "private",
+            "lease": null,
+            "stopped": false
+        }]),
+        "{state}"
+    );
+    assert!(run(&fixture, "stop").await.status.success());
+    let mut stopped = next_state(&mut lines).await;
+    // One look may read the host's flag before the stop and the nested one after it.
+    while stopped["background"][0]["stopped"] != true || stopped["stopped"] != true {
+        stopped = next_state(&mut lines).await;
+    }
+    assert!(nested.join("stop").exists());
+    watch.kill().await.ok();
+}
+
+/// The next `state` line `watch` prints, within 10 s.
+async fn next_state(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+) -> serde_json::Value {
+    loop {
+        let line = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+            .await
+            .expect("a line within 10 s")
+            .unwrap()
+            .expect("watch still runs");
+        let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if event["event"] == "state" {
+            return event;
+        }
+    }
+}
+
 /// What `stop` says on stderr when it fails, as it must.
 async fn refused_stop(fixture: &Fixture) -> String {
     let stop = run(fixture, "stop").await;

@@ -58,6 +58,16 @@ export type Agent = {
   replaced: boolean,
 }
 
+-- A background desktop: a nested niri on a host workspace of its own, where an
+-- agent works without touching the user's focus, keyboard or pointer.
+export type Background = {
+  instance: string,
+  workspace: string,
+  bus: string,
+  lease: Lease?,
+  stopped: boolean,
+}
+
 export type Call = {
   key: string,
   text: string,
@@ -72,6 +82,8 @@ export type Call = {
   -- A key call's combinations, such as `{ "Escape", "comma" }`, when the log
   -- kept them rather than only their count.
   keys: { string }?,
+  -- The workspace of the background desktop the call was made on, if any.
+  background: string?,
 }
 
 export type Change =
@@ -92,6 +104,7 @@ export type Desk = {
   inputDirty: boolean,
   calls: { Call },
   agents: { Agent },
+  background: { Background },
   count: number,
   version: string?,
   -- `missing`, `old`, `format` or the text of a line that wasn't JSON, such as watch's error.
@@ -123,6 +136,7 @@ function M.new(): Desk
     inputDirty = false,
     calls = {},
     agents = {},
+    background = {},
     count = 0,
     version = nil,
     problem = nil,
@@ -186,6 +200,46 @@ local function agents(value: any): { Agent }
   return out
 end
 
+local function backgrounds(value: any): { Background }
+  local out: { Background } = {}
+  if type(value) ~= "table" then
+    return out
+  end
+  for _, item in value do
+    if type(item) == "table" and type(item.instance) == "string" then
+      table.insert(out, {
+        instance = item.instance,
+        workspace = if type(item.workspace) == "string" then item.workspace else item.instance,
+        bus = tostring(item.bus or "?"),
+        lease = lease(item.lease),
+        stopped = item.stopped == true,
+      })
+    end
+  end
+  return out
+end
+
+-- How many background desktops an agent holds.
+function M.working(list: { Background }): number
+  local count = 0
+  for _, item in list do
+    if item.lease then
+      count += 1
+    end
+  end
+  return count
+end
+
+-- Whether any background desktop is stopped.
+function M.anyStopped(list: { Background }): boolean
+  for _, item in list do
+    if item.stopped then
+      return true
+    end
+  end
+  return false
+end
+
 -- How many agents run a build an update replaced.
 function M.outdated(list: { Agent }): number
   local count = 0
@@ -218,6 +272,7 @@ local function state(desk: Desk, event: any, nowMs: number, found: { Change })
     table.insert(changes, { kind = "outdated", count = outdated } :: Change)
   end
   desk.agents = servers
+  desk.background = backgrounds(event.background)
   for _, change in changes do
     if desk.settled or change.kind == "stuck" then
       table.insert(found, change)
@@ -281,6 +336,7 @@ local function call(desk: Desk, event: any, tr: Tr, changes: { Change })
     ts = tostring(event.ts or ""),
     durationMs = if type(event.duration_ms) == "number" then event.duration_ms else nil,
     keys = keyList(tool, event.args),
+    background = if type(event.background) == "string" then event.background else nil,
   }
   table.insert(desk.calls, entry)
   if #desk.calls > M.KEEP then
@@ -378,6 +434,7 @@ function M.view(desk: Desk, nowMs: number)
     inputDirty = desk.inputDirty,
     calls = table.clone(desk.calls),
     agents = table.clone(desk.agents),
+    background = table.clone(desk.background),
     version = desk.version,
     problem = desk.problem,
     lastError = desk.lastError,

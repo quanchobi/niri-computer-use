@@ -166,6 +166,18 @@ t.group("service", function()
     t.eq(host.errors[1].body, "Install it, or set its path in this plugin's settings.")
   end)
 
+  t.test("toggle resumes while only a background desktop is stopped", function()
+    local host, service = started()
+    local stopped = { instance = "niri.wayland-2.42.sock", workspace = "agent-shop", bus = "private", stopped = true }
+    host.event({ event = "state", stopped = false, input_dirty = false, background = { stopped } })
+    service.call("onIpc", "toggle", "")
+    t.ok(host.commands[1].command:find('exec "$b" resume', 1, true), host.commands[1].command)
+    stopped.stopped = false
+    host.event({ event = "state", stopped = false, input_dirty = false, background = { stopped } })
+    service.call("onIpc", "toggle", "")
+    t.ok(host.commands[2].command:find('exec "$b" stop', 1, true), host.commands[2].command)
+  end)
+
   t.test("a configured binary is the one run", function()
     local host = env.host()
     host.config.binary = "/opt/ncu/niri-computer-use"

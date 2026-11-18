@@ -1,11 +1,14 @@
 //! `watch`: what agents are doing on this niri instance, as JSON lines on stdout for a
 //! shell to show. One `hello` line first, then `state` whenever the lease, the stop flag
-//! the input-dirty marker or the agents' servers change, `action` for each tool call the audit log records
-//! for this instance, the last `BACKLOG` of them first, `live` for each record of the
-//! action in progress (`crate::live`), and `alive` every `ALIVE`, so a
-//! reader can tell a quiet desktop from a watch that ended. The lines carry only what the
-//! audit log and the lease record already hold, and for `live` the `app_id` niri reports
-//! for the window an action is about, never typed text or window titles.
+//! the input-dirty marker, the agents' servers or the background desktops change, `action`
+//! for each tool call the audit log records for this instance or one of its background
+//! desktops, the last `BACKLOG` of them first, `live` for each record of the action in
+//! progress (`crate::live`) on this instance, and `alive` every `ALIVE`, so a reader can
+//! tell a quiet desktop from a watch that ended. The lines carry only what the audit log,
+//! the lease records and the background desktops' records already hold, and for `live`
+//! the `app_id` niri reports for the window an action is about, never typed text or window
+//! titles. A background desktop's actions get no `live` lines: their coordinates are the
+//! nested niri's, not the host's the overlay draws on.
 
 mod clients;
 mod run;
@@ -20,6 +23,7 @@ use serde_json::Value;
 pub(crate) use clients::{Client, project_of};
 
 use crate::control::lease::Holder;
+use crate::policy::background::Bus;
 
 /// The format's version, in `hello`. A reader refuses a version it doesn't know.
 pub(crate) const FORMAT: u32 = 1;
@@ -57,6 +61,23 @@ pub(crate) struct State {
     pub(crate) input_dirty: bool,
     /// Every agent's server on this instance.
     pub(crate) clients: Vec<Client>,
+    /// The background desktops started from this instance.
+    pub(crate) background: Vec<Background>,
+}
+
+/// A background desktop started from this instance, a nested niri on a host workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct Background {
+    /// The nested niri's socket's file name, as the audit log names its instance.
+    pub(crate) instance: String,
+    /// The host workspace its window is on.
+    pub(crate) workspace: String,
+    /// The session bus its apps get: `private` or `host`.
+    pub(crate) bus: Bus,
+    /// Who holds its lease, or is asking for it.
+    pub(crate) lease: Option<Driver>,
+    /// Whether its stop flag is set.
+    pub(crate) stopped: bool,
 }
 
 /// Who holds the lease, or is asking for it.
@@ -97,12 +118,17 @@ pub(crate) fn parent_pid(status: &str) -> Option<u32> {
         .ok()
 }
 
-/// The call an audit line records, if it is one on `instance`, without the instance.
-pub(crate) fn action(line: &[u8], instance: &str) -> Option<Value> {
+/// The call an audit line records, if it is one on `instance` or on one of the
+/// `background` desktops, without the instance; a background desktop's call gets
+/// `background` with its workspace instead.
+pub(crate) fn action(line: &[u8], instance: &str, background: &[Background]) -> Option<Value> {
     let mut value: Value = serde_json::from_slice(line).ok()?;
     let object = value.as_object_mut()?;
-    if object.remove("instance")?.as_str()? != instance {
-        return None;
+    let on = object.remove("instance")?;
+    let on = on.as_str()?;
+    if on != instance {
+        let desktop = background.iter().find(|desktop| desktop.instance == on)?;
+        object.insert("background".into(), desktop.workspace.clone().into());
     }
     Some(value)
 }
@@ -184,14 +210,28 @@ mod tests {
     }
 
     #[test]
-    fn only_calls_on_this_instance_are_actions() {
+    fn only_calls_on_this_instance_or_its_background_desktops_are_actions() {
         let line = br#"{"ts":"t","session":"claude-code/7","instance":"niri.1.sock","tool":"key"}"#;
-        let action = action(line, "niri.1.sock").unwrap();
+        let action = action(line, "niri.1.sock", &[]).unwrap();
         assert_eq!(action["tool"], "key");
         assert!(action.get("instance").is_none());
-        assert_eq!(super::action(line, "niri.2.sock"), None);
-        assert_eq!(super::action(br#"{"tool":"key"}"#, "niri.1.sock"), None);
-        assert_eq!(super::action(b"not json", "niri.1.sock"), None);
+        assert!(action.get("background").is_none());
+        assert_eq!(super::action(line, "niri.2.sock", &[]), None);
+        assert_eq!(
+            super::action(br#"{"tool":"key"}"#, "niri.1.sock", &[]),
+            None
+        );
+        assert_eq!(super::action(b"not json", "niri.1.sock", &[]), None);
+        let desktop = Background {
+            instance: "niri.1.sock".to_owned(),
+            workspace: "agent-shop".to_owned(),
+            bus: Bus::Private,
+            lease: None,
+            stopped: false,
+        };
+        let nested = super::action(line, "niri.2.sock", &[desktop]).unwrap();
+        assert_eq!(nested["background"], "agent-shop");
+        assert!(nested.get("instance").is_none());
     }
 
     #[test]

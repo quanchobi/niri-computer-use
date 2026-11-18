@@ -9,7 +9,7 @@
 //! activation files, socket and log. `plan.rs` decides what the start writes and picks,
 //! with no I/O; `start.rs` and `teardown.rs` do it and undo it; `rules.rs` handles the
 //! host's rules file; `record.rs` keeps what teardown needs; `registry.rs` lists the
-//! running desktops of a host instance, for `stop` and `resume`.
+//! running desktops of a host instance, for `stop`, `resume` and `watch`.
 
 pub(crate) mod plan;
 pub(crate) mod record;
